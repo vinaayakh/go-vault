@@ -16,6 +16,7 @@
 #   • go vet           — suspicious constructs (ships with Go)
 #   • golangci-lint    — bundles gosec, staticcheck, errcheck, ineffassign,
 #                        gocritic, govet… config in .golangci.yml  (make tools)
+#   • eslint           — React/TS frontend lint   (npm --prefix web install)
 
 minimum_pre_commit_version: "3.5.0"
 
@@ -74,4 +75,13 @@ repos:
         entry: golangci-lint run
         language: system
         types: [go]
+        pass_filenames: false
+
+      - id: eslint
+        name: eslint
+        description: Lint the React/TS frontend (npm --prefix web run lint).
+        entry: npm --prefix web run lint
+        language: system
+        types_or: [ts, tsx]
+        files: ^web/src/
         pass_filenames: false

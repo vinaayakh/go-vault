@@ -4,7 +4,7 @@
 BINARY := bin/server
 PKG     := ./...
 
-.PHONY: help build run test generate openapi web web-build web-install lint fmt sec wasm clean tools precommit
+.PHONY: help build run test generate openapi web web-build web-install web-lint lint fmt sec wasm clean tools precommit
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -34,6 +34,9 @@ web: ## Run the React dev server (proxies /api to :8080)
 
 web-build: ## Type-check and build the frontend for production
 	npm --prefix web run build
+
+web-lint: ## Lint the frontend (ESLint, config in web/eslint.config.js)
+	npm --prefix web run lint
 
 tools: ## Install dev tools used by pre-commit (goimports, golangci-lint)
 	go install golang.org/x/tools/cmd/goimports@latest

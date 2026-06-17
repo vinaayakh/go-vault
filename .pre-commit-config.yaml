@@ -1,0 +1,77 @@
+# Phase 0 · task 0.2 — Local pre-commit hooks.
+#
+# One-time setup:
+#   pipx install pre-commit        # or: pip install pre-commit
+#   make tools                     # installs goimports + golangci-lint
+#   pre-commit install             # wires hooks into .git/hooks/pre-commit
+#
+# Run against the whole repo on demand:  pre-commit run --all-files
+# Refresh pinned hook versions:          pre-commit autoupdate
+#
+# What runs on every commit:
+#   • generic hygiene  — whitespace, EOF, large files, leaked private keys
+#   • gitleaks         — secret scanning (self-contained; no local install)
+#   • gofmt            — formatting           (ships with Go)
+#   • goimports        — import grouping      (make tools)
+#   • go vet           — suspicious constructs (ships with Go)
+#   • golangci-lint    — bundles gosec, staticcheck, errcheck, ineffassign,
+#                        gocritic, govet… config in .golangci.yml  (make tools)
+
+minimum_pre_commit_version: "3.5.0"
+
+# Only lint on commit; the heavier full-repo scans also run in CI as a backstop.
+default_stages: [pre-commit]
+
+repos:
+  # ── Generic hygiene (self-contained) ─────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: detect-private-key
+      - id: check-yaml
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  # ── Secret scanning (self-contained; pre-commit builds the binary) ───
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # ── Go toolchain (uses your locally installed tools) ─────────────────
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        description: Format Go source (ships with the Go toolchain).
+        entry: gofmt -l -w
+        language: system
+        types: [go]
+
+      - id: goimports
+        name: goimports
+        description: Group/prune imports (go install golang.org/x/tools/cmd/goimports).
+        entry: goimports -l -w
+        language: system
+        types: [go]
+
+      - id: go-vet
+        name: go vet
+        description: Report suspicious constructs across all packages.
+        entry: go vet ./...
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: golangci-lint
+        name: golangci-lint
+        description: Run the linter suite (gosec, staticcheck, errcheck, …).
+        entry: golangci-lint run
+        language: system
+        types: [go]
+        pass_filenames: false

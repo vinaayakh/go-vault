@@ -1,0 +1,38 @@
+# Phase 0 · task 0.3 — golangci-lint config (schema v2).
+# Findings are treated as errors: golangci-lint exits non-zero on any issue,
+# which fails both the pre-commit hook and CI.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  # `standard` already enables errcheck, govet, ineffassign, staticcheck, unused.
+  # We add the security + opinionated linters the threat model calls for.
+  default: standard
+  enable:
+    - gosec     # security analyzer (hardcoded creds, weak crypto, unsafe calls)
+    - gocritic  # diagnostics, performance, and style checks
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+  exclusions:
+    generated: lax          # skip oapi-codegen / *_gen.go output
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/vinaayakh/secure-vault

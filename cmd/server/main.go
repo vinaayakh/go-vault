@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,10 +21,20 @@ import (
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
+	// Keep os.Exit confined to main with no pending defers; all cleanup lives in
+	// run() so deferred stop()/cancel() always execute (gocritic: exitAfterDefer).
+	if err := run(log); err != nil {
+		log.Error("server stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+// run wires up and serves the API, blocking until an interrupt triggers a
+// graceful shutdown. It returns the first fatal error, or nil on clean exit.
+func run(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Error("invalid configuration", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
 	srv := &http.Server{
@@ -39,21 +50,25 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("ok", "addr", cfg.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error("server error", "error", err)
-			stop()
+			serveErr <- err
 		}
 	}()
 
-	<-ctx.Done()
+	select {
+	case err := <-serveErr:
+		return fmt.Errorf("server error: %w", err)
+	case <-ctx.Done():
+	}
 	log.Info("shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("graceful shutdown failed", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("graceful shutdown failed: %w", err)
 	}
+	return nil
 }

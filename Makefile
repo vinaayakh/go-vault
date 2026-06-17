@@ -4,7 +4,7 @@
 BINARY := bin/server
 PKG     := ./...
 
-.PHONY: help build run test generate openapi web web-build web-install lint sec wasm clean
+.PHONY: help build run test generate openapi web web-build web-install lint fmt sec wasm clean tools precommit
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -35,8 +35,19 @@ web: ## Run the React dev server (proxies /api to :8080)
 web-build: ## Type-check and build the frontend for production
 	npm --prefix web run build
 
-lint: ## Run golangci-lint (Phase 0 task 0.3 — config added next)
-	@echo "TODO(phase-0): add .golangci.yml and run golangci-lint"
+tools: ## Install dev tools used by pre-commit (goimports, golangci-lint)
+	go install golang.org/x/tools/cmd/goimports@latest
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+
+precommit: ## Run all pre-commit hooks against the whole repo
+	pre-commit run --all-files
+
+fmt: ## Format Go source (gofmt + goimports)
+	gofmt -l -w .
+	goimports -l -w .
+
+lint: ## Run golangci-lint (config in .golangci.yml)
+	golangci-lint run
 
 sec: ## Run govulncheck + gosec (Phase 0 task 0.4)
 	@echo "TODO(phase-0): wire govulncheck ./... and gosec"

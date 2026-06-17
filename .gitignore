@@ -1,0 +1,30 @@
+# ── Go ──────────────────────────────────────────────────────────────
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# ── WASM build output (Phase 4) ─────────────────────────────────────
+*.wasm
+/web/public/wasm_exec.js
+
+# ── Node / frontend ─────────────────────────────────────────────────
+/web/node_modules/
+/web/dist/
+/web/*.tsbuildinfo
+/.vite/
+npm-debug.log*
+
+# ── Secrets / local config (never commit) ──────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Local planning docs (kept on disk, not tracked) ────────────────
+/plan/
+
+# ── Editor / OS ─────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/

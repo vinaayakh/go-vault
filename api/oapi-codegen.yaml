@@ -1,0 +1,13 @@
+# oapi-codegen configuration — generates the Go server interface + models from
+# api/openapi.yaml. Output is internal/api/gen/api.gen.go (package gen).
+#
+# Regenerate with `make generate` (runs `go generate ./...`); the directive lives
+# in internal/api/gen/generate.go. Do not edit the generated file by hand.
+package: gen
+output: internal/api/gen/api.gen.go   # resolved relative to repo root (where `make generate` runs)
+generate:
+  std-http-server: true   # Go 1.22+ net/http ServeMux server (no third-party router)
+  models: true            # request/response/schema types
+  embedded-spec: true     # embeds the spec so handlers can self-describe if needed
+output-options:
+  skip-prune: false

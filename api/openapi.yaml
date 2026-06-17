@@ -1,0 +1,135 @@
+openapi: 3.0.3
+info:
+  title: Secure Vault API
+  description: |
+    Zero-knowledge password manager API. The server stores and returns **only
+    ciphertext + metadata** — it never sees plaintext vault items or master
+    passwords. All encryption happens client-side (WASM crypto core, Phase 4).
+
+    This is the Phase 0 contract: a live `/api/health` endpoint plus the item
+    endpoints stubbed out so the shape is fixed before the storage layer
+    (Phase 2) and auth (Phase 3) land.
+  version: 0.0.0
+servers:
+  - url: /
+    description: Local development (served by cmd/server)
+
+paths:
+  /api/health:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      description: Returns ok when the server is up. No authentication required.
+      tags: [system]
+      responses:
+        "200":
+          description: Server is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /api/items:
+    get:
+      operationId: listItems
+      summary: List the caller's vault items (ciphertext only)
+      description: |
+        Returns every vault item belonging to the authenticated user as opaque
+        ciphertext + metadata. STUB in Phase 0 — returns 501 until the storage
+        layer (Phase 2) and auth (Phase 3) exist.
+      tags: [items]
+      responses:
+        "200":
+          description: The user's encrypted vault items.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Item"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+    post:
+      operationId: createItem
+      summary: Store a new encrypted vault item
+      description: |
+        Accepts an opaque ciphertext blob + metadata only. The server validates
+        the envelope shape but cannot read the contents. STUB in Phase 0.
+      tags: [items]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewItem"
+      responses:
+        "201":
+          description: Item stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+
+components:
+  responses:
+    NotImplemented:
+      description: Endpoint is stubbed and not yet implemented.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+
+    # An encrypted vault item as stored/returned by the server. Mirrors the
+    # `vault_items` columns from plan/phase-2-server-storage.md: ciphertext +
+    # metadata ONLY — never plaintext. This encodes the zero-knowledge
+    # invariant directly into the API contract.
+    Item:
+      type: object
+      required: [id, item_type, ciphertext, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Server-assigned item identifier.
+        item_type:
+          type: string
+          description: Non-secret category hint (e.g. "login", "note", "card").
+          enum: [login, note, card, identity]
+        ciphertext:
+          type: string
+          description: |
+            Base64-encoded AEAD ciphertext of the item. Opaque to the server.
+        updated_at:
+          type: string
+          format: date-time
+          description: Last revision timestamp (server clock).
+
+    NewItem:
+      type: object
+      required: [item_type, ciphertext]
+      properties:
+        item_type:
+          type: string
+          enum: [login, note, card, identity]
+        ciphertext:
+          type: string
+          description: Base64-encoded AEAD ciphertext. The server never decrypts it.
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Generic, non-sensitive error message safe to show clients.

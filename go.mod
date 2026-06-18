@@ -1,6 +1,6 @@
 module github.com/vinaayakh/secure-vault
 
-go 1.22
+go 1.24.3
 
 require (
 	github.com/getkin/kin-openapi v0.135.0

@@ -29,7 +29,7 @@ linters:
       - std-error-handling
     paths:
       # Third-party JS deps ship a stray vendored .go file; never our code to lint.
-      - web/node_modules
+      - ^web[/\\]node_modules([/\\]|$)
 
 formatters:
   enable:
@@ -41,4 +41,4 @@ formatters:
         - github.com/vinaayakh/secure-vault
   exclusions:
     paths:
-      - web/node_modules
+      - ^web[/\\]node_modules([/\\]|$)

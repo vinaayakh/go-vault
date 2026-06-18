@@ -4,8 +4,11 @@ Zero-knowledge, Bitwarden-style password manager — a learning project for Go a
 DevSecOps. See [`plan/`](plan/README.md) for the phased build plan and the
 zero-knowledge architecture.
 
-This repository currently contains the **Phase 0 web-app skeleton**: a runnable
-React frontend + Go backend wired through an OpenAPI contract.
+This repository currently contains the **Phase 0 web-app skeleton** plus the
+**Phase 1 crypto core**: a runnable React frontend + Go backend wired through an
+OpenAPI contract, and the pure-Go zero-knowledge crypto package
+(`internal/crypto`) that implements the full key hierarchy, AEAD, and key
+wrapping — tested, known-answer-verified, and fuzzed.
 
 ## Architecture (Phase 0)
 
@@ -28,9 +31,42 @@ truth**: `oapi-codegen` generates the Go server interface
 | `cmd/server/` | HTTP server entrypoint (hardened `http.Server`) |
 | `internal/api/` | Handlers, router, middleware + generated `gen/` code |
 | `internal/config/` | Env config, validated at startup |
-| `internal/{crypto,auth,vault,storage}/` | Empty stubs for Phases 1–3 |
+| `internal/crypto/` | **Phase 1** zero-knowledge crypto core: key hierarchy, Argon2id, XChaCha20-Poly1305 AEAD, key wrapping, item encryption |
+| `internal/{auth,vault,storage}/` | Empty stubs for Phases 2–3 |
 | `api/` | `openapi.yaml` contract + `oapi-codegen.yaml` config |
 | `web/` | React + TS frontend (Vite) |
+
+## Crypto core (Phase 1)
+
+`internal/crypto` is a pure-Go, network-free package implementing the
+zero-knowledge key hierarchy. It is the single crypto implementation, written so
+the same code compiles to WASM for the browser in Phase 4.
+
+```
+master password + email(salt) ──Argon2id──► master key
+   ├─ HKDF-Expand ──► stretched master key (enc + mac)  → wraps the vault key
+   └─ Argon2id (2nd, independent pass) ──► auth hash     → sent to the server
+vault key (crypto/rand, 32B) ──XChaCha20-Poly1305──► protected symmetric key
+```
+
+| Function | Purpose |
+|---|---|
+| `DeriveMasterKey` / `StretchMasterKey` | Argon2id KDF + HKDF-SHA256 subkeys |
+| `DeriveAuthHash` / `DeriveServerAuthHash` | Independent auth-hash passes (client + server) |
+| `NewVaultKey` / `NewServerSalt` | CSPRNG key + salt generation |
+| `Seal` / `Open` | XChaCha20-Poly1305 AEAD (`nonce(24) ‖ ciphertext ‖ tag`) |
+| `WrapKey` / `UnwrapKey` | Envelope-encrypt the vault key under the stretched master key |
+| `EncryptItem` / `DecryptItem` | JSON-serialize + seal/open a vault item |
+| `Zero` / `ConstantTimeEqual` | Memory hygiene + constant-time secret comparison |
+
+Parameters, wire formats, and the security rationale are pinned in
+[`docs/THREAT_MODEL.md` §8](docs/THREAT_MODEL.md) and
+[`plan/phase-1-crypto-core.md`](plan/phase-1-crypto-core.md).
+
+```sh
+go test -race ./internal/crypto/...        # unit + known-answer + property tests
+go test -fuzz=FuzzOpen -fuzztime=60s ./internal/crypto/   # fuzz Open on malformed blobs
+```
 
 ## Run it
 

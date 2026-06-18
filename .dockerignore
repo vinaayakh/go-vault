@@ -1,0 +1,18 @@
+# Keep the build context small and free of host/build artifacts and secrets.
+.git
+.github
+plan
+bin
+*.exe
+*.test
+*.out
+coverage.*
+web/node_modules
+web/dist
+*.wasm
+.env
+.env.*
+!.env.example
+.idea
+.vscode
+.DS_Store

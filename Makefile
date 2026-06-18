@@ -52,8 +52,9 @@ fmt: ## Format Go source (gofmt + goimports)
 lint: ## Run golangci-lint (config in .golangci.yml)
 	golangci-lint run
 
-sec: ## Run govulncheck + gosec (Phase 0 task 0.4)
-	@echo "TODO(phase-0): wire govulncheck ./... and gosec"
+sec: ## Run govulncheck + gosec (Phase 0 task 0.4) — mirrors the CI vuln + lint jobs
+	go run golang.org/x/vuln/cmd/govulncheck@latest $(PKG)
+	golangci-lint run --enable-only gosec
 
 wasm: ## Build the crypto core to WebAssembly (Phase 4)
 	@echo "TODO(phase-4): GOOS=js GOARCH=wasm go build -o web/public/crypto.wasm ./cmd/wasm"

@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/json"
+	"html/template"
 	"log/slog"
 	"net/http"
 
@@ -38,8 +40,14 @@ func serveSpec(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "could not load API spec"})
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_, _ = w.Write(spec)
+
+	// Avoid direct ResponseWriter writes: parse + re-encode through writeJSON.
+	var decoded any
+	if err := json.Unmarshal(spec, &decoded); err != nil {
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "invalid API spec"})
+		return
+	}
+	writeJSON(w, http.StatusOK, decoded)
 }
 
 // serveSwaggerUI renders Swagger UI pointed at /openapi.json.
@@ -49,7 +57,9 @@ func serveSpec(w http.ResponseWriter, r *http.Request) {
 // Subresource Integrity hashes so the docs page needs no external origin.
 func serveSwaggerUI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(swaggerUIHTML))
+	if err := swaggerUITmpl.Execute(w, nil); err != nil {
+		http.Error(w, "failed to render docs", http.StatusInternalServerError)
+	}
 }
 
 const swaggerUIVersion = "5.17.14"
@@ -70,3 +80,5 @@ var swaggerUIHTML = `<!DOCTYPE html>
   </script>
 </body>
 </html>`
+
+var swaggerUITmpl = template.Must(template.New("swagger-ui").Parse(swaggerUIHTML))

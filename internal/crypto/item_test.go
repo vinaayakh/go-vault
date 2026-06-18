@@ -18,7 +18,7 @@ func TestEncryptDecryptItem(t *testing.T) {
 		TOTPSeed: "JBSWY3DPEHPK3PXP",
 	}
 
-	blob, err := EncryptItem(key, item, []byte("item-42"))
+	blob, err := EncryptItem(key, &item, []byte("item-42"))
 	if err != nil {
 		t.Fatalf("EncryptItem: %v", err)
 	}
@@ -43,7 +43,8 @@ func TestEncryptDecryptItemEmpty(t *testing.T) {
 	t.Parallel()
 
 	key := newTestKey(t)
-	blob, err := EncryptItem(key, Item{}, nil)
+	item := Item{}
+	blob, err := EncryptItem(key, &item, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,8 @@ func TestDecryptItemWrongAAD(t *testing.T) {
 	t.Parallel()
 
 	key := newTestKey(t)
-	blob, err := EncryptItem(key, Item{Name: "x"}, []byte("id-1"))
+	item := Item{Name: "x"}
+	blob, err := EncryptItem(key, &item, []byte("id-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +75,8 @@ func TestDecryptItemTampered(t *testing.T) {
 	t.Parallel()
 
 	key := newTestKey(t)
-	blob, err := EncryptItem(key, Item{Name: "x", Password: "y"}, nil)
+	item := Item{Name: "x", Password: "y"}
+	blob, err := EncryptItem(key, &item, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

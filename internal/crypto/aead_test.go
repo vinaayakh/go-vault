@@ -221,7 +221,7 @@ func TestMasterPasswordChange(t *testing.T) {
 	blobs := make([][]byte, len(items))
 	blobsBefore := make([][]byte, len(items))
 	for i, it := range items {
-		b, err := EncryptItem(vaultKey, it, nil)
+		b, err := EncryptItem(vaultKey, &it, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

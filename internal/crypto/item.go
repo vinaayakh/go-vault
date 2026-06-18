@@ -2,6 +2,7 @@ package crypto
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -20,7 +21,11 @@ type Item struct {
 // EncryptItem serializes item to JSON and seals it under the vault key. aad
 // (which may be nil) binds the ciphertext to its context, e.g. the item id. The
 // transient plaintext buffer is zeroed before returning.
-func EncryptItem(vaultKey []byte, item Item, aad []byte) ([]byte, error) {
+func EncryptItem(vaultKey []byte, item *Item, aad []byte) ([]byte, error) {
+	if item == nil {
+		return nil, errors.New("item must not be nil")
+	}
+
 	// The marshaled JSON (which contains the password/TOTP fields) exists only to
 	// be sealed on the next line; it is never persisted, logged, or transmitted
 	// in cleartext, and the buffer is zeroed via defer below.

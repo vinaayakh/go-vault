@@ -1,13 +1,13 @@
 # Secure Vault — Threat Model
 
-> **Status:** Living document — first STRIDE pass (Phase 0).
+> **Status:** Living document — STRIDE pass updated through Phase 1.
 > **Last updated:** 2026-06-18.
 > **Scope:** the secure-vault zero-knowledge password manager (server, database, web client).
 
 This document is revised as the system grows. Each later phase has a checklist item to update
-the relevant section here: Phase 1 fills in the [Cryptographic specification](#8-cryptographic-specification),
-Phase 3 expands the [authentication trust boundary](#trust-boundaries), and Phase 5 adds the
-audit-log and 2FA considerations.
+the relevant section here: Phase 1 has filled in the [Cryptographic specification](#8-cryptographic-specification)
+(now as-built), Phase 3 expands the [authentication trust boundary](#trust-boundaries), and
+Phase 5 adds the audit-log and 2FA considerations.
 
 ---
 
@@ -147,8 +147,8 @@ server middleware, the contract); planned controls are tagged with their phase.
 
 | Threat | Asset / boundary | Mitigation | Status |
 |---|---|---|---|
-| Modify ciphertext at rest or in transit | Vault items | AEAD (XChaCha20-Poly1305) — any bit flip fails authentication on `Open` | 🔜 Phase 1 |
-| Tamper with KDF params to weaken derivation | KDF params | Params bound to the user row; re-derivation re-validates; versioned, never silently reinterpreted | 🔜 Phase 1/2 |
+| Modify ciphertext at rest or in transit | Vault items | AEAD (XChaCha20-Poly1305) — any bit flip fails authentication on `Open` | ✅ in place (`internal/crypto`, tamper- + fuzz-tested) |
+| Tamper with KDF params to weaken derivation | KDF params | Versioned params validated on use (`KDFParams.validate`, `:v1:` HKDF labels), never silently reinterpreted; binding to the user row lands in Phase 2 | ✅ Phase 1 (versioning/validation) / 🔜 Phase 2 (bound to user row) |
 | Malicious dependency or poisoned image | Supply chain | `govulncheck`, Trivy image scan, Dependabot, SBOM (syft), gosec/CodeQL/semgrep in CI | ✅ in place (Dependabot 🔜 0.5) |
 | Cross-site request forces a state change | Browser↔Server | CSRF protection (double-submit / SameSite + custom header) | 🔜 Phase 3 |
 

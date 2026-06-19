@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // maxBodyBytes caps request bodies to defend against memory-exhaustion DoS.
@@ -15,7 +17,12 @@ const maxBodyBytes = 1 << 20
 
 type ctxKey string
 
-const requestIDKey ctxKey = "request_id"
+const (
+	requestIDKey ctxKey = "request_id"
+	// userIDKey carries the acting user's UUID injected by devAuthGuard (Phase 2)
+	// or session auth (Phase 3). Handlers retrieve it via userIDFromCtx.
+	userIDKey ctxKey = "user_id"
+)
 
 // Middleware is the standard net/http decorator shape.
 type Middleware func(http.Handler) http.Handler
@@ -104,6 +111,49 @@ func (w *statusWriter) WriteHeader(code int) {
 		w.wroteHeader = true
 	}
 	w.ResponseWriter.WriteHeader(code)
+}
+
+// devAuthGuard is the TEMPORARY Phase 2 authentication guard.
+// It reads the X-Dev-User header as the acting user UUID and injects it into
+// the request context. It is ONLY active when appEnv == "dev" && devAuth == true;
+// it hard-fails with 403 in any other environment (fail-closed).
+//
+// Phase 3 deletes this and replaces it with real session authentication.
+func devAuthGuard(appEnv string, devAuth bool) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if appEnv != "dev" || !devAuth {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "authentication required",
+				})
+				return
+			}
+			raw := r.Header.Get("X-Dev-User")
+			if raw == "" {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "X-Dev-User header required in dev mode",
+				})
+				return
+			}
+			id, err := uuid.Parse(raw)
+			if err != nil {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "X-Dev-User must be a valid UUID",
+				})
+				return
+			}
+			ctx := context.WithValue(r.Context(), userIDKey, id)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// userIDFromCtx extracts the acting user UUID from the request context.
+// Returns the zero UUID and false if not present (should only happen if a route
+// was wired without the auth guard — treat as a programming error).
+func userIDFromCtx(ctx context.Context) (uuid.UUID, bool) {
+	id, ok := ctx.Value(userIDKey).(uuid.UUID)
+	return id, ok
 }
 
 func newRequestID() string {

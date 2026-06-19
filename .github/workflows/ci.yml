@@ -40,6 +40,41 @@ jobs:
       - run: go build ./...
       - run: go test -race ./...
 
+  integration-test:
+    name: integration tests (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vault_root
+          POSTGRES_PASSWORD: cipassword
+          POSTGRES_DB: vault_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vault_root -d vault_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_SUPERUSER_URL: postgres://vault_root:cipassword@localhost:5432/vault_test?sslmode=disable
+      TEST_DATABASE_URL: postgres://vault_root:cipassword@localhost:5432/vault_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install golang-migrate CLI
+        run: |
+          curl -sSfL https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin migrate
+      - name: Run migrations
+        run: migrate -path migrations -database "$DATABASE_SUPERUSER_URL" up
+      - name: Run integration tests
+        run: go test -race -tags integration ./internal/storage/...
+
   lint:
     name: golangci-lint (gosec)
     runs-on: ubuntu-latest

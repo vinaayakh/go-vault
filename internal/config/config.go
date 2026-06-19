@@ -4,14 +4,15 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"time"
 )
 
-// Config holds validated server settings. Secrets (DB DSN, keys) are added in
-// later phases; each must be validated here so startup fails loudly if absent.
+// Config holds validated server settings. Secrets (DB DSN, keys) must be set
+// via environment variables; hard-coded defaults only for non-secret values.
 type Config struct {
 	// Addr is the host:port the HTTP server listens on.
 	Addr string
@@ -22,6 +23,19 @@ type Config struct {
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
 	IdleTimeout       time.Duration
+
+	// DatabaseDSN is the PostgreSQL connection string. Required; startup fails
+	// if absent. Example: postgres://user:pass@localhost:5432/vault?sslmode=disable
+	DatabaseDSN string
+
+	// AppEnv distinguishes the deployment environment. Only "dev" enables the
+	// temporary dev-auth guard (Phase 2). Any other value (including "prod") is
+	// treated as production — the guard is hard-disabled regardless of DevAuth.
+	AppEnv string
+
+	// DevAuth enables the X-Dev-User guard ONLY when AppEnv == "dev".
+	// Hard-forced false in any non-dev environment (fail-closed).
+	DevAuth bool
 }
 
 // Load reads configuration from the environment, applies safe defaults, and
@@ -33,12 +47,24 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("PORT must be a number, got %q", port)
 	}
 
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return nil, errors.New("DATABASE_URL is required but not set")
+	}
+
+	appEnv := getenv("APP_ENV", "prod")
+
+	devAuth := appEnv == "dev" && os.Getenv("DEV_AUTH") == "on"
+
 	cfg := &Config{
 		Addr:              ":" + port,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		DatabaseDSN:       dsn,
+		AppEnv:            appEnv,
+		DevAuth:           devAuth,
 	}
 	return cfg, nil
 }

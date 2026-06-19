@@ -6,10 +6,13 @@ info:
     ciphertext + metadata** — it never sees plaintext vault items or master
     passwords. All encryption happens client-side (WASM crypto core, Phase 4).
 
-    This is the Phase 0 contract: a live `/api/health` endpoint plus the item
-    endpoints stubbed out so the shape is fixed before the storage layer
-    (Phase 2) and auth (Phase 3) land.
-  version: 0.0.0
+    **API versioning:** v0 endpoints live under `/api`. Breaking changes in later
+    phases will use `/api/v1`. Document any breaking change before moving the prefix.
+
+    **Phase 0 → 2 progression:** health was the only live endpoint in Phase 0.
+    Phase 2 adds the full item CRUD, a sync snapshot, and a readiness probe.
+    Authentication (Phase 3) will replace the temporary `X-Dev-User` dev guard.
+  version: 0.2.0
 servers:
   - url: /
     description: Local development (served by cmd/server)
@@ -29,14 +32,37 @@ paths:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
 
+  /api/ready:
+    get:
+      operationId: getReady
+      summary: Readiness probe
+      description: |
+        Returns ready when the server can serve traffic — specifically, when the
+        database connection is alive. Orchestrators gate traffic on this; do not
+        use it as a liveness check (a transient DB blip must not kill the pod).
+      tags: [system]
+      responses:
+        "200":
+          description: Server is ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+        "503":
+          description: Server not ready (DB unreachable).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /api/items:
     get:
       operationId: listItems
       summary: List the caller's vault items (ciphertext only)
       description: |
         Returns every vault item belonging to the authenticated user as opaque
-        ciphertext + metadata. STUB in Phase 0 — returns 501 until the storage
-        layer (Phase 2) and auth (Phase 3) exist.
+        ciphertext + metadata. Requires `X-Dev-User` header in dev mode (Phase 2
+        temporary guard); Phase 3 replaces this with session auth.
       tags: [items]
       responses:
         "200":
@@ -47,14 +73,14 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Item"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
+        "403":
+          $ref: "#/components/responses/Forbidden"
     post:
       operationId: createItem
       summary: Store a new encrypted vault item
       description: |
         Accepts an opaque ciphertext blob + metadata only. The server validates
-        the envelope shape but cannot read the contents. STUB in Phase 0.
+        the envelope shape but cannot read the contents.
       tags: [items]
       requestBody:
         required: true
@@ -69,11 +95,114 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Item"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/items/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: The item's server-assigned UUID.
+    put:
+      operationId: updateItem
+      summary: Replace an existing encrypted vault item
+      description: |
+        Replaces the ciphertext and/or item_type of an existing item. Uses
+        optimistic concurrency: the client supplies `current_revision` (the last
+        revision it observed). The server rejects the write with 409 if the stored
+        revision is newer, and increments `revision` + `updated_at` on success.
+        This is last-write-wins guarded by revision — enough for two-device sync.
+      tags: [items]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateItem"
+      responses:
+        "200":
+          description: Item updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Conflict — a newer revision exists. Fetch and merge before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      operationId: deleteItem
+      summary: Delete a vault item
+      description: |
+        Permanently deletes the item. The next `GET /api/sync` snapshot will not
+        include it (full-snapshot model — no tombstones in v0).
+      tags: [items]
+      responses:
+        "204":
+          description: Item deleted.
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/sync:
+    get:
+      operationId: getSync
+      summary: Full vault snapshot for unlock
+      description: |
+        Returns everything the client needs to unlock the vault: the user's
+        protected symmetric key, the KDF params used to derive the master key,
+        and the complete list of encrypted items.
+
+        **Sync model (v0 — full snapshot):** returns ALL items on every call. No
+        incremental sync, no pagination, no tombstones. A deleted item simply
+        disappears from the next snapshot. Revisit only if a vault grows large
+        enough to matter.
+      tags: [sync]
+      responses:
+        "200":
+          description: Full vault snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
 components:
   responses:
+    BadRequest:
+      description: Invalid request body or parameters.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Missing or invalid authentication.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found (or not owned by caller).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     NotImplemented:
       description: Endpoint is stubbed and not yet implemented.
       content:
@@ -90,13 +219,21 @@ components:
           type: string
           example: ok
 
+    ReadyResponse:
+      type: object
+      required: [ready]
+      properties:
+        ready:
+          type: boolean
+          example: true
+
     # An encrypted vault item as stored/returned by the server. Mirrors the
     # `vault_items` columns from plan/phase-2-server-storage.md: ciphertext +
     # metadata ONLY — never plaintext. This encodes the zero-knowledge
     # invariant directly into the API contract.
     Item:
       type: object
-      required: [id, item_type, ciphertext, updated_at]
+      required: [id, item_type, ciphertext, revision, updated_at]
       properties:
         id:
           type: string
@@ -109,7 +246,16 @@ components:
         ciphertext:
           type: string
           description: |
-            Base64-encoded AEAD ciphertext of the item. Opaque to the server.
+            Base64-encoded (standard, padded) AEAD ciphertext of the item.
+            Opaque to the server. Format: nonce(24 bytes) || ciphertext || tag(16 bytes),
+            base64-encoded as a single blob. See plan/phase-1-crypto-core.md §wire-formats.
+        revision:
+          type: integer
+          description: |
+            Monotonically increasing server-side revision counter. Starts at 1 on
+            creation, incremented by the server on every successful PUT. Used by
+            clients for optimistic concurrency (supply in UpdateItem.current_revision).
+          minimum: 1
         updated_at:
           type: string
           format: date-time
@@ -125,6 +271,70 @@ components:
         ciphertext:
           type: string
           description: Base64-encoded AEAD ciphertext. The server never decrypts it.
+
+    UpdateItem:
+      type: object
+      required: [ciphertext, current_revision]
+      properties:
+        item_type:
+          type: string
+          enum: [login, note, card, identity]
+          description: Optional — omit to keep existing item_type.
+        ciphertext:
+          type: string
+          description: Replacement ciphertext blob (base64, standard padded).
+        current_revision:
+          type: integer
+          description: |
+            The revision the client last observed. The server rejects with 409 if
+            the stored revision is strictly greater than this value.
+          minimum: 1
+
+    # KDFParams is the Argon2id derivation settings stored alongside each user.
+    # The client receives these at sync time so it can re-derive the master key.
+    # Wire format matches plan/phase-1-crypto-core.md §wire-formats exactly:
+    # { "type": "argon2id", "version": 19, "memory_kib": 65536, "iterations": 3, "parallelism": 1 }
+    KDFParams:
+      type: object
+      required: [type, version, memory_kib, iterations, parallelism]
+      properties:
+        type:
+          type: string
+          example: argon2id
+        version:
+          type: integer
+          description: Argon2 version constant (0x13 = 19).
+          example: 19
+        memory_kib:
+          type: integer
+          description: Memory cost in kibibytes.
+          example: 65536
+        iterations:
+          type: integer
+          description: Time cost (iteration count).
+          example: 3
+        parallelism:
+          type: integer
+          description: Degree of parallelism.
+          example: 1
+
+    SyncResponse:
+      type: object
+      required: [protected_symmetric_key, kdf_params, items]
+      properties:
+        protected_symmetric_key:
+          type: string
+          description: |
+            Base64-encoded wrapped vault key (AEAD-encrypted with the stretched
+            master key). The client unwraps it after key derivation to obtain the
+            vault key used to decrypt items.
+        kdf_params:
+          $ref: "#/components/schemas/KDFParams"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Item"
+          description: Complete snapshot of all vault items (full-snapshot model, v0).
 
     Error:
       type: object

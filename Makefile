@@ -4,7 +4,11 @@
 BINARY := bin/server
 PKG     := ./...
 
-.PHONY: help build run test generate openapi web web-build web-install web-lint lint fmt sec wasm clean tools precommit
+# Load .env if present (for DATABASE_URL, APP_ENV, etc.).
+-include .env
+export
+
+.PHONY: help build run test test-integration generate openapi web web-build web-install web-lint lint fmt sec wasm clean tools precommit db-up db-down migrate-up migrate-down sqlc grant-app-role
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -19,6 +23,9 @@ run: ## Run the API server (PORT overridable, default 8080)
 
 test: ## Run Go tests with the race detector
 	go test -race $(PKG)
+
+test-integration: ## Run integration tests (requires TEST_DATABASE_URL env var)
+	go test -race -tags integration ./internal/storage/...
 
 generate: ## Regenerate code from go:generate directives (oapi-codegen)
 	go generate $(PKG)
@@ -58,6 +65,24 @@ sec: ## Run govulncheck + gosec (Phase 0 task 0.4) — mirrors the CI vuln + lin
 
 wasm: ## Build the crypto core to WebAssembly (Phase 4)
 	@echo "TODO(phase-4): GOOS=js GOARCH=wasm go build -o web/public/crypto.wasm ./cmd/wasm"
+
+db-up: ## Start PostgreSQL via Docker Compose
+	docker compose -f deploy/docker-compose.yml up -d
+
+db-down: ## Stop and remove PostgreSQL container (data volume preserved)
+	docker compose -f deploy/docker-compose.yml down
+
+migrate-up: ## Apply all pending migrations (requires DATABASE_SUPERUSER_URL)
+	migrate -path migrations -database "$(DATABASE_SUPERUSER_URL)" up
+
+migrate-down: ## Roll back the last migration (requires DATABASE_SUPERUSER_URL)
+	migrate -path migrations -database "$(DATABASE_SUPERUSER_URL)" down 1
+
+grant-app-role: ## Grant least-privilege DML access to vault_app after migration
+	psql "$(DATABASE_SUPERUSER_URL)" -f deploy/grant-app-role.sql
+
+sqlc: ## Regenerate storage/sqlcgen from db/queries (requires sqlc; run on Linux in CI)
+	sqlc generate
 
 clean: ## Remove build artifacts
 	rm -rf bin web/dist

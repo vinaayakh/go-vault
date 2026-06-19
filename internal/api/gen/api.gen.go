@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/oapi-codegen/runtime"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
@@ -68,6 +69,30 @@ func (e NewItemItemType) Valid() bool {
 	}
 }
 
+// Defines values for UpdateItemItemType.
+const (
+	Card     UpdateItemItemType = "card"
+	Identity UpdateItemItemType = "identity"
+	Login    UpdateItemItemType = "login"
+	Note     UpdateItemItemType = "note"
+)
+
+// Valid indicates whether the value is a known member of the UpdateItemItemType enum.
+func (e UpdateItemItemType) Valid() bool {
+	switch e {
+	case Card:
+		return true
+	case Identity:
+		return true
+	case Login:
+		return true
+	case Note:
+		return true
+	default:
+		return false
+	}
+}
+
 // Error defines model for Error.
 type Error struct {
 	// Error Generic, non-sensitive error message safe to show clients.
@@ -81,7 +106,9 @@ type HealthResponse struct {
 
 // Item defines model for Item.
 type Item struct {
-	// Ciphertext Base64-encoded AEAD ciphertext of the item. Opaque to the server.
+	// Ciphertext Base64-encoded (standard, padded) AEAD ciphertext of the item.
+	// Opaque to the server. Format: nonce(24 bytes) || ciphertext || tag(16 bytes),
+	// base64-encoded as a single blob. See plan/phase-1-crypto-core.md §wire-formats.
 	Ciphertext string `json:"ciphertext"`
 
 	// Id Server-assigned item identifier.
@@ -90,12 +117,33 @@ type Item struct {
 	// ItemType Non-secret category hint (e.g. "login", "note", "card").
 	ItemType ItemItemType `json:"item_type"`
 
+	// Revision Monotonically increasing server-side revision counter. Starts at 1 on
+	// creation, incremented by the server on every successful PUT. Used by
+	// clients for optimistic concurrency (supply in UpdateItem.current_revision).
+	Revision int `json:"revision"`
+
 	// UpdatedAt Last revision timestamp (server clock).
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // ItemItemType Non-secret category hint (e.g. "login", "note", "card").
 type ItemItemType string
+
+// KDFParams defines model for KDFParams.
+type KDFParams struct {
+	// Iterations Time cost (iteration count).
+	Iterations int `json:"iterations"`
+
+	// MemoryKib Memory cost in kibibytes.
+	MemoryKib int `json:"memory_kib"`
+
+	// Parallelism Degree of parallelism.
+	Parallelism int    `json:"parallelism"`
+	Type        string `json:"type"`
+
+	// Version Argon2 version constant (0x13 = 19).
+	Version int `json:"version"`
+}
 
 // NewItem defines model for NewItem.
 type NewItem struct {
@@ -107,11 +155,53 @@ type NewItem struct {
 // NewItemItemType defines model for NewItem.ItemType.
 type NewItemItemType string
 
-// NotImplemented defines model for NotImplemented.
-type NotImplemented = Error
+// ReadyResponse defines model for ReadyResponse.
+type ReadyResponse struct {
+	Ready bool `json:"ready"`
+}
+
+// SyncResponse defines model for SyncResponse.
+type SyncResponse struct {
+	// Items Complete snapshot of all vault items (full-snapshot model, v0).
+	Items     []Item    `json:"items"`
+	KdfParams KDFParams `json:"kdf_params"`
+
+	// ProtectedSymmetricKey Base64-encoded wrapped vault key (AEAD-encrypted with the stretched
+	// master key). The client unwraps it after key derivation to obtain the
+	// vault key used to decrypt items.
+	ProtectedSymmetricKey string `json:"protected_symmetric_key"`
+}
+
+// UpdateItem defines model for UpdateItem.
+type UpdateItem struct {
+	// Ciphertext Replacement ciphertext blob (base64, standard padded).
+	Ciphertext string `json:"ciphertext"`
+
+	// CurrentRevision The revision the client last observed. The server rejects with 409 if
+	// the stored revision is strictly greater than this value.
+	CurrentRevision int `json:"current_revision"`
+
+	// ItemType Optional — omit to keep existing item_type.
+	ItemType *UpdateItemItemType `json:"item_type,omitempty"`
+}
+
+// UpdateItemItemType Optional — omit to keep existing item_type.
+type UpdateItemItemType string
+
+// BadRequest defines model for BadRequest.
+type BadRequest = Error
+
+// Forbidden defines model for Forbidden.
+type Forbidden = Error
+
+// NotFound defines model for NotFound.
+type NotFound = Error
 
 // CreateItemJSONRequestBody defines body for CreateItem for application/json ContentType.
 type CreateItemJSONRequestBody = NewItem
+
+// UpdateItemJSONRequestBody defines body for UpdateItem for application/json ContentType.
+type UpdateItemJSONRequestBody = UpdateItem
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
@@ -124,6 +214,18 @@ type ServerInterface interface {
 	// Store a new encrypted vault item
 	// (POST /api/items)
 	CreateItem(w http.ResponseWriter, r *http.Request)
+	// Delete a vault item
+	// (DELETE /api/items/{id})
+	DeleteItem(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
+	// Replace an existing encrypted vault item
+	// (PUT /api/items/{id})
+	UpdateItem(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
+	// Readiness probe
+	// (GET /api/ready)
+	GetReady(w http.ResponseWriter, r *http.Request)
+	// Full vault snapshot for unlock
+	// (GET /api/sync)
+	GetSync(w http.ResponseWriter, r *http.Request)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -168,6 +270,86 @@ func (siw *ServerInterfaceWrapper) CreateItem(w http.ResponseWriter, r *http.Req
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.CreateItem(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteItem operation middleware
+func (siw *ServerInterfaceWrapper) DeleteItem(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid"})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteItem(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateItem operation middleware
+func (siw *ServerInterfaceWrapper) UpdateItem(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid"})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateItem(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetReady operation middleware
+func (siw *ServerInterfaceWrapper) GetReady(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetReady(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetSync operation middleware
+func (siw *ServerInterfaceWrapper) GetSync(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetSync(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -300,6 +482,10 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/health", wrapper.GetHealth)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/items", wrapper.ListItems)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/items", wrapper.CreateItem)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/items/{id}", wrapper.DeleteItem)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/api/items/{id}", wrapper.UpdateItem)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/ready", wrapper.GetReady)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/sync", wrapper.GetSync)
 
 	return m
 }
@@ -309,26 +495,54 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -32,11 +33,6 @@ type Config struct {
 	// AllowedOrigin is the single frontend origin allowed by CORS.
 	// Defaults to http://localhost:5173 (Vite dev server).
 	AllowedOrigin string
-
-	// SecureCookies controls whether session cookies carry the Secure flag.
-	// Derived from AllowedOrigin: true when the origin is HTTPS, false for HTTP
-	// (allows cookie to be sent in plain-HTTP local dev flows).
-	SecureCookies bool
 
 	// SessionDuration is how long a session cookie is valid.
 	// Defaults to 24 hours.
@@ -68,6 +64,17 @@ func Load() (*Config, error) {
 
 	allowedOrigin := getenv("ALLOWED_ORIGIN", "http://localhost:5173")
 
+	if !strings.HasPrefix(allowedOrigin, "https://") {
+		u, err := url.Parse(allowedOrigin)
+		if err != nil {
+			return nil, fmt.Errorf("ALLOWED_ORIGIN %q is not a valid URL: %w", allowedOrigin, err)
+		}
+		host := u.Hostname()
+		if host != "localhost" && host != "127.0.0.1" && host != "::1" && !strings.HasSuffix(host, ".localhost") {
+			return nil, fmt.Errorf("ALLOWED_ORIGIN %q uses HTTP with a non-localhost host; set an https:// URL for non-local deployments", allowedOrigin)
+		}
+	}
+
 	cfg := &Config{
 		Addr:              ":" + port,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -76,7 +83,6 @@ func Load() (*Config, error) {
 		IdleTimeout:       60 * time.Second,
 		DatabaseDSN:       dsn,
 		AllowedOrigin:     allowedOrigin,
-		SecureCookies:     strings.HasPrefix(allowedOrigin, "https://"),
 		SessionDuration:   sessionDuration,
 	}
 	return cfg, nil

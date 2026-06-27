@@ -23,15 +23,14 @@ const sessionMaxAge = 86400 // 24 hours in seconds
 // Server implements gen.ServerInterface — the set of handlers generated from
 // api/openapi.yaml.
 type Server struct {
-	log           *slog.Logger
-	store         *storage.Store
-	auth          *auth.Manager
-	secureCookies bool
+	log   *slog.Logger
+	store *storage.Store
+	auth  *auth.Manager
 }
 
 // NewServer constructs the API handler set.
-func NewServer(log *slog.Logger, store *storage.Store, authMgr *auth.Manager, secureCookies bool) *Server {
-	return &Server{log: log, store: store, auth: authMgr, secureCookies: secureCookies}
+func NewServer(log *slog.Logger, store *storage.Store, authMgr *auth.Manager) *Server {
+	return &Server{log: log, store: store, auth: authMgr}
 }
 
 // Ensure *Server satisfies the generated contract at compile time.
@@ -169,13 +168,13 @@ func (s *Server) PostLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure is set via config (true in prod); HttpOnly + SameSite=Strict are always set
+	http.SetCookie(w, &http.Cookie{
 		Name:     auth.CookieName,
 		Value:    rawToken,
 		Path:     "/",
 		MaxAge:   sessionMaxAge,
 		HttpOnly: true,
-		Secure:   s.secureCookies,
+		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
 
@@ -202,13 +201,13 @@ func (s *Server) PostLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clear cookie unconditionally.
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: see login handler comment
+	http.SetCookie(w, &http.Cookie{
 		Name:     auth.CookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   s.secureCookies,
+		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
 	w.WriteHeader(http.StatusNoContent)
@@ -232,13 +231,13 @@ func (s *Server) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: see login handler comment
+	http.SetCookie(w, &http.Cookie{
 		Name:     auth.CookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   s.secureCookies,
+		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
 	w.WriteHeader(http.StatusNoContent)

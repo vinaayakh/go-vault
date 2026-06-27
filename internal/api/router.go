@@ -25,7 +25,7 @@ import (
 //   - State-changing routes additionally require the X-Vault-CSRF: 1 header.
 func NewRouter(log *slog.Logger, store *storage.Store, authMgr *auth.Manager, cfg *config.Config) http.Handler {
 	mux := http.NewServeMux()
-	srv := NewServer(log, store, authMgr, cfg.SecureCookies)
+	srv := NewServer(log, store, authMgr)
 
 	// --- Unguarded routes (no session required) ---
 	mux.HandleFunc("GET /api/health", srv.GetHealth)

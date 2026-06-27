@@ -189,6 +189,9 @@ func TestRegisterLogin(t *testing.T) {
 	if !cookie.HttpOnly {
 		t.Error("session cookie must be HttpOnly")
 	}
+	if !cookie.Secure {
+		t.Error("session cookie must have the Secure flag set")
+	}
 	if cookie.SameSite != http.SameSiteStrictMode {
 		t.Error("session cookie must be SameSite=Strict")
 	}

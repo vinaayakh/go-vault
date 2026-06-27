@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vinaayakh/secure-vault/internal/api/gen"
+	"github.com/vinaayakh/secure-vault/internal/auth"
 	"github.com/vinaayakh/secure-vault/internal/config"
 	"github.com/vinaayakh/secure-vault/internal/storage"
 )
@@ -19,45 +20,89 @@ import (
 // Routing strategy (Go 1.22 ServeMux):
 //   - More-specific patterns beat less-specific ones, so unguarded routes
 //     registered on the outer mux win over the guarded /api/ subtree.
-//   - Health + ready are unguarded (orchestrator probes must not require auth).
-//   - Items + sync are guarded by the Phase 2 dev-auth guard.
-func NewRouter(log *slog.Logger, store *storage.Store, cfg *config.Config) http.Handler {
+//   - Health + ready + register + login are unguarded (no auth required).
+//   - Items, sync, logout, and user routes are guarded by sessionAuth.
+//   - State-changing routes additionally require the X-Vault-CSRF: 1 header.
+func NewRouter(log *slog.Logger, store *storage.Store, authMgr *auth.Manager, cfg *config.Config) http.Handler {
 	mux := http.NewServeMux()
-	srv := NewServer(log, store)
+	srv := NewServer(log, store, authMgr, cfg.SecureCookies)
 
-	// --- Unguarded routes (no auth required) ---
-	// These are registered directly on the outer mux; they win over /api/
-	// because Go 1.22 ServeMux uses longest-prefix precedence.
+	// --- Unguarded routes (no session required) ---
 	mux.HandleFunc("GET /api/health", srv.GetHealth)
 	mux.HandleFunc("GET /api/ready", srv.GetReady)
 	mux.HandleFunc("GET /openapi.json", serveSpec)
 	mux.HandleFunc("GET /docs", serveSwaggerUI)
 
-	// --- Guarded routes (Phase 2 dev-auth; Phase 3 → session auth) ---
-	// A sub-mux holds these routes; the dev-auth guard wraps it.
-	// The sub-mux is mounted under /api/ so it receives all /api/* traffic
-	// not already claimed by the more-specific unguarded patterns above.
-	protected := http.NewServeMux()
-	protected.HandleFunc("GET /api/items", srv.ListItems)
-	protected.HandleFunc("POST /api/items", srv.CreateItem)
-	protected.HandleFunc("PUT /api/items/{id}", withItemID(srv.UpdateItem))
-	protected.HandleFunc("DELETE /api/items/{id}", withItemID(srv.DeleteItem))
-	protected.HandleFunc("GET /api/sync", srv.GetSync)
+	// Auth endpoints: rate-limited inside handlers, but no session required.
+	mux.HandleFunc("POST /api/register", chain(
+		http.HandlerFunc(srv.PostRegister),
+		requireCSRF(),
+	).ServeHTTP)
+	mux.HandleFunc("POST /api/login", chain(
+		http.HandlerFunc(srv.PostLogin),
+		requireCSRF(),
+	).ServeHTTP)
 
-	// Wrap the protected sub-mux with auth, then mount it.
-	mux.Handle("/api/", chain(protected, devAuthGuard(cfg.AppEnv, cfg.DevAuth)))
+	// --- Session-guarded routes ---
+	// Logout: guarded, state-changing.
+	mux.HandleFunc("POST /api/logout", chain(
+		http.HandlerFunc(srv.PostLogout),
+		sessionAuth(authMgr),
+		requireCSRF(),
+	).ServeHTTP)
 
-	// Global middleware — outermost first (applied to everything including unguarded routes).
+	// User management: guarded, state-changing.
+	mux.HandleFunc("DELETE /api/user", chain(
+		http.HandlerFunc(srv.DeleteUser),
+		sessionAuth(authMgr),
+		requireCSRF(),
+	).ServeHTTP)
+	mux.HandleFunc("PUT /api/user/key", chain(
+		http.HandlerFunc(srv.PutUserKey),
+		sessionAuth(authMgr),
+		requireCSRF(),
+	).ServeHTTP)
+
+	// Item CRUD: guarded. GET is read-only (no CSRF needed); POST/PUT/DELETE are state-changing.
+	mux.HandleFunc("GET /api/items", chain(
+		http.HandlerFunc(srv.ListItems),
+		sessionAuth(authMgr),
+	).ServeHTTP)
+	mux.HandleFunc("POST /api/items", chain(
+		http.HandlerFunc(srv.CreateItem),
+		sessionAuth(authMgr),
+		requireCSRF(),
+	).ServeHTTP)
+	mux.HandleFunc("PUT /api/items/{id}", chain(
+		http.HandlerFunc(withItemID(srv.UpdateItem)),
+		sessionAuth(authMgr),
+		requireCSRF(),
+	).ServeHTTP)
+	mux.HandleFunc("DELETE /api/items/{id}", chain(
+		http.HandlerFunc(withItemID(srv.DeleteItem)),
+		sessionAuth(authMgr),
+		requireCSRF(),
+	).ServeHTTP)
+
+	// Sync: read-only, session-guarded.
+	mux.HandleFunc("GET /api/sync", chain(
+		http.HandlerFunc(srv.GetSync),
+		sessionAuth(authMgr),
+	).ServeHTTP)
+
+	// Global middleware — outermost first (applied to everything).
 	return chain(mux,
 		requestID(),
 		recoverPanic(log),
 		logRequests(log),
 		limitBody(),
+		securityHeaders(),
+		cors(cfg.AllowedOrigin),
 	)
 }
 
-// serveSpec returns the OpenAPI document (decompressed from the generated embed)
-// as JSON, so the docs UI always matches the deployed contract.
+// serveSpec returns the OpenAPI document as JSON so the docs UI always matches
+// the deployed contract.
 func serveSpec(w http.ResponseWriter, r *http.Request) {
 	spec, err := gen.GetSpecJSON()
 	if err != nil {
@@ -75,11 +120,23 @@ func serveSpec(w http.ResponseWriter, r *http.Request) {
 
 // serveSwaggerUI renders Swagger UI pointed at /openapi.json.
 //
-// Assets are loaded from a version-pinned CDN for Phase 0 simplicity. Phase 3
-// (security headers / CSP) should vendor swagger-ui-dist locally and/or add
-// Subresource Integrity hashes so the docs page needs no external origin.
+// Assets are loaded from a version-pinned CDN for Phase 0 simplicity. Phase 5
+// (hardening) should vendor swagger-ui-dist locally and add Subresource Integrity
+// hashes so the docs page needs no external origin in the CSP.
+//
+// We override the global restrictive CSP here: the CDN-hosted Swagger UI requires
+// external script/style sources and executes inline JS. This override applies only
+// to the /docs route; all API endpoints keep the strict policy.
 func serveSwaggerUI(w http.ResponseWriter, r *http.Request) {
+	cdn := "https://cdn.jsdelivr.net"
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'none'; "+
+			"script-src '"+cdn+"' 'unsafe-inline'; "+
+			"style-src '"+cdn+"' 'unsafe-inline'; "+
+			"img-src 'self' data: '"+cdn+"'; "+
+			"connect-src 'self'; "+
+			"frame-ancestors 'none'; base-uri 'self'")
 	if err := swaggerUITmpl.Execute(w, nil); err != nil {
 		http.Error(w, "failed to render docs", http.StatusInternalServerError)
 	}

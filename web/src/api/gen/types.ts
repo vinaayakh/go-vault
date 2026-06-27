@@ -4,6 +4,120 @@
  */
 
 export interface paths {
+    "/api/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Register a new account
+         * @description Accepts the email, KDF params, client-derived auth hash, and the
+         *     protected (wrapped) vault key. The server stores a server-side Argon2id
+         *     hash of the auth hash — it never sees the master password or key.
+         *
+         *     Returns a uniform 201 regardless of whether the email is already
+         *     registered to prevent account enumeration.
+         */
+        post: operations["postRegister"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Authenticate and open a session
+         * @description Accepts email + the client-derived auth hash. The server re-hashes the
+         *     auth hash server-side and compares with the stored value using
+         *     constant-time equality. On success, sets a `vault_session` session cookie
+         *     (HttpOnly, Secure, SameSite=Strict) and returns the protected symmetric
+         *     key + KDF params so the client can unlock the vault locally.
+         */
+        post: operations["postLogin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revoke the current session
+         * @description Revokes the session server-side and clears the `vault_session` cookie.
+         *     Requires a valid session cookie and the `X-Vault-CSRF: 1` header.
+         */
+        post: operations["postLogout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/user": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete the authenticated user's account
+         * @description Revokes all sessions, then permanently deletes the user row and all
+         *     vault items (ON DELETE CASCADE). This is irreversible.
+         */
+        delete: operations["deleteUser"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/user/key": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Rotate master password (update auth credentials and wrapped key)
+         * @description Atomically updates the server-side auth hash, KDF params, and protected
+         *     symmetric key for a master-password change. The client re-derives
+         *     everything locally and sends only the new auth hash + new wrapped vault
+         *     key — the plaintext vault key and master key are never sent.
+         */
+        put: operations["putUserKey"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -24,6 +138,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Readiness probe
+         * @description Returns ready when the server can serve traffic — specifically, when the
+         *     database connection is alive. Orchestrators gate traffic on this; do not
+         *     use it as a liveness check (a transient DB blip must not kill the pod).
+         */
+        get: operations["getReady"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/items": {
         parameters: {
             query?: never;
@@ -34,17 +170,75 @@ export interface paths {
         /**
          * List the caller's vault items (ciphertext only)
          * @description Returns every vault item belonging to the authenticated user as opaque
-         *     ciphertext + metadata. STUB in Phase 0 — returns 501 until the storage
-         *     layer (Phase 2) and auth (Phase 3) exist.
+         *     ciphertext + metadata. Requires a valid `vault_session` cookie (Phase 3).
          */
         get: operations["listItems"];
         put?: never;
         /**
          * Store a new encrypted vault item
          * @description Accepts an opaque ciphertext blob + metadata only. The server validates
-         *     the envelope shape but cannot read the contents. STUB in Phase 0.
+         *     the envelope shape but cannot read the contents.
          */
         post: operations["createItem"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/items/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The item's server-assigned UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace an existing encrypted vault item
+         * @description Replaces the ciphertext and/or item_type of an existing item. Uses
+         *     optimistic concurrency: the client supplies `current_revision` (the last
+         *     revision it observed). The server rejects the write with 409 if the stored
+         *     revision is newer, and increments `revision` + `updated_at` on success.
+         *     This is last-write-wins guarded by revision — enough for two-device sync.
+         */
+        put: operations["updateItem"];
+        post?: never;
+        /**
+         * Delete a vault item
+         * @description Permanently deletes the item. The next `GET /api/sync` snapshot will not
+         *     include it (full-snapshot model — no tombstones in v0).
+         */
+        delete: operations["deleteItem"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Full vault snapshot for unlock
+         * @description Returns everything the client needs to unlock the vault: the user's
+         *     protected symmetric key, the KDF params used to derive the master key,
+         *     and the complete list of encrypted items.
+         *
+         *     **Sync model (v0 — full snapshot):** returns ALL items on every call. No
+         *     incremental sync, no pagination, no tombstones. A deleted item simply
+         *     disappears from the next snapshot. Revisit only if a vault grows large
+         *     enough to matter.
+         */
+        get: operations["getSync"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -59,6 +253,10 @@ export interface components {
             /** @example ok */
             status: string;
         };
+        ReadyResponse: {
+            /** @example true */
+            ready: boolean;
+        };
         Item: {
             /**
              * Format: uuid
@@ -70,8 +268,18 @@ export interface components {
              * @enum {string}
              */
             item_type: "login" | "note" | "card" | "identity";
-            /** @description Base64-encoded AEAD ciphertext of the item. Opaque to the server. */
+            /**
+             * @description Base64-encoded (standard, padded) AEAD ciphertext of the item.
+             *     Opaque to the server. Format: nonce(24 bytes) || ciphertext || tag(16 bytes),
+             *     base64-encoded as a single blob. See plan/phase-1-crypto-core.md §wire-formats.
+             */
             ciphertext: string;
+            /**
+             * @description Monotonically increasing server-side revision counter. Starts at 1 on
+             *     creation, incremented by the server on every successful PUT. Used by
+             *     clients for optimistic concurrency (supply in UpdateItem.current_revision).
+             */
+            revision: number;
             /**
              * Format: date-time
              * @description Last revision timestamp (server clock).
@@ -84,12 +292,146 @@ export interface components {
             /** @description Base64-encoded AEAD ciphertext. The server never decrypts it. */
             ciphertext: string;
         };
+        UpdateItem: {
+            /**
+             * @description Optional — omit to keep existing item_type.
+             * @enum {string}
+             */
+            item_type?: "login" | "note" | "card" | "identity";
+            /** @description Replacement ciphertext blob (base64, standard padded). */
+            ciphertext: string;
+            /**
+             * @description The revision the client last observed. The server rejects with 409 if
+             *     the stored revision is strictly greater than this value.
+             */
+            current_revision: number;
+        };
+        KDFParams: {
+            /** @example argon2id */
+            type: string;
+            /**
+             * @description Argon2 version constant (0x13 = 19).
+             * @example 19
+             */
+            version: number;
+            /**
+             * @description Memory cost in kibibytes.
+             * @example 65536
+             */
+            memory_kib: number;
+            /**
+             * @description Time cost (iteration count).
+             * @example 3
+             */
+            iterations: number;
+            /**
+             * @description Degree of parallelism.
+             * @example 1
+             */
+            parallelism: number;
+        };
+        SyncResponse: {
+            /**
+             * @description Base64-encoded wrapped vault key (AEAD-encrypted with the stretched
+             *     master key). The client unwraps it after key derivation to obtain the
+             *     vault key used to decrypt items.
+             */
+            protected_symmetric_key: string;
+            kdf_params: components["schemas"]["KDFParams"];
+            /** @description Complete snapshot of all vault items (full-snapshot model, v0). */
+            items: components["schemas"]["Item"][];
+        };
+        RegisterRequest: {
+            /**
+             * Format: email
+             * @description User's email address (normalized to lowercase before storage).
+             */
+            email: string;
+            kdf_params: components["schemas"]["KDFParams"];
+            /**
+             * @description Base64-encoded (standard, padded) client-derived auth hash.
+             *     This is the OUTPUT of the second independent Argon2id pass
+             *     (DeriveAuthHash) — never the master password or master key.
+             */
+            auth_hash: string;
+            /**
+             * @description Base64-encoded AEAD-encrypted vault key (wrapped with the
+             *     stretched master key). Stored opaquely; returned at sync time.
+             */
+            protected_symmetric_key: string;
+        };
+        LoginRequest: {
+            /** Format: email */
+            email: string;
+            /** @description Base64-encoded client-derived auth hash (same derivation as registration). */
+            auth_hash: string;
+        };
+        LoginResponse: {
+            /**
+             * @description Base64-encoded wrapped vault key. The client unwraps it with the
+             *     stretched master key to obtain the vault key for item decryption.
+             */
+            protected_symmetric_key: string;
+            kdf_params: components["schemas"]["KDFParams"];
+        };
+        UpdateKeyRequest: {
+            /** @description New base64-encoded client-derived auth hash (re-derived from new password). */
+            auth_hash: string;
+            kdf_params: components["schemas"]["KDFParams"];
+            /** @description New base64-encoded wrapped vault key (re-wrapped with new master key). */
+            protected_symmetric_key: string;
+        };
         Error: {
             /** @description Generic, non-sensitive error message safe to show clients. */
             error: string;
         };
     };
     responses: {
+        /** @description Invalid request body or parameters. */
+        BadRequest: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description Missing or invalid session. */
+        Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description Action not permitted for the authenticated user. */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description Resource not found (or not owned by caller). */
+        NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description Rate limit exceeded. Back off and retry later. */
+        TooManyRequests: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
         /** @description Endpoint is stubbed and not yet implemented. */
         NotImplemented: {
             headers: {
@@ -107,6 +449,119 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    postRegister: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegisterRequest"];
+            };
+        };
+        responses: {
+            /** @description Account created (or email already exists — response is identical). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            429: components["responses"]["TooManyRequests"];
+        };
+    };
+    postLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Authenticated. Session cookie set. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+        };
+    };
+    postLogout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Session revoked. Cookie cleared. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    deleteUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Account deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    putUserKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateKeyRequest"];
+            };
+        };
+        responses: {
+            /** @description Auth credentials and wrapped key updated. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
     getHealth: {
         parameters: {
             query?: never;
@@ -123,6 +578,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    getReady: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Server is ready. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadyResponse"];
+                };
+            };
+            /** @description Server not ready (DB unreachable). */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -145,7 +629,7 @@ export interface operations {
                     "application/json": components["schemas"]["Item"][];
                 };
             };
-            501: components["responses"]["NotImplemented"];
+            401: components["responses"]["Unauthorized"];
         };
     };
     createItem: {
@@ -170,7 +654,91 @@ export interface operations {
                     "application/json": components["schemas"]["Item"];
                 };
             };
-            501: components["responses"]["NotImplemented"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    updateItem: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The item's server-assigned UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateItem"];
+            };
+        };
+        responses: {
+            /** @description Item updated. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Item"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /** @description Conflict — a newer revision exists. Fetch and merge before retrying. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    deleteItem: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The item's server-assigned UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Item deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getSync: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Full vault snapshot. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
         };
     };
 }

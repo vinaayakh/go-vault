@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/vinaayakh/secure-vault/internal/auth"
 )
 
 // maxBodyBytes caps request bodies to defend against memory-exhaustion DoS.
@@ -19,8 +22,8 @@ type ctxKey string
 
 const (
 	requestIDKey ctxKey = "request_id"
-	// userIDKey carries the acting user's UUID injected by devAuthGuard (Phase 2)
-	// or session auth (Phase 3). Handlers retrieve it via userIDFromCtx.
+	// userIDKey carries the acting user's UUID injected by sessionAuth.
+	// Handlers retrieve it via userIDFromCtx.
 	userIDKey ctxKey = "user_id"
 )
 
@@ -113,44 +116,107 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-// devAuthGuard is the TEMPORARY Phase 2 authentication guard.
-// It reads the X-Dev-User header as the acting user UUID and injects it into
-// the request context. It is ONLY active when appEnv == "dev" && devAuth == true;
-// it hard-fails with 403 in any other environment (fail-closed).
-//
-// Phase 3 deletes this and replaces it with real session authentication.
-func devAuthGuard(appEnv string, devAuth bool) Middleware {
+// sessionAuth validates the vault_session cookie on every protected request.
+// On success it injects the user UUID into the context so handlers can retrieve
+// it with userIDFromCtx. Returns 401 on any failure (no distinction between
+// missing, expired, or invalid — avoids information leaks).
+func sessionAuth(mgr *auth.Manager) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if appEnv != "dev" || !devAuth {
-				writeJSON(w, http.StatusForbidden, map[string]string{
-					"error": "authentication required",
-				})
-				return
-			}
-			raw := r.Header.Get("X-Dev-User")
-			if raw == "" {
-				writeJSON(w, http.StatusForbidden, map[string]string{
-					"error": "X-Dev-User header required in dev mode",
-				})
-				return
-			}
-			id, err := uuid.Parse(raw)
+			cookie, err := r.Cookie(auth.CookieName)
 			if err != nil {
-				writeJSON(w, http.StatusForbidden, map[string]string{
-					"error": "X-Dev-User must be a valid UUID",
-				})
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 				return
 			}
-			ctx := context.WithValue(r.Context(), userIDKey, id)
+
+			sess, err := mgr.ValidateSession(r.Context(), cookie.Value)
+			if errors.Is(err, auth.ErrSessionInvalid) {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+				return
+			}
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), userIDKey, sess.UserID)
 			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// securityHeaders adds the OWASP-recommended response headers to every response.
+// HSTS, CSP, nosniff, frame-ancestors, and Referrer-Policy are all set here.
+// The Swagger UI CDN requires relaxing CSP for /docs — handled in the route itself.
+func securityHeaders() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := w.Header()
+			// HSTS: 2 years, include subdomains, eligible for preload list.
+			h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+			h.Set("X-Content-Type-Options", "nosniff")
+			h.Set("X-Frame-Options", "DENY")
+			h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			// Restrictive CSP: allow only same-origin resources; no inline scripts.
+			// 'wasm-unsafe-eval' is required by Chrome/Firefox to instantiate WebAssembly
+			// modules fetched from the same origin (Phase 4 crypto.wasm).
+			h.Set("Content-Security-Policy",
+				"default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; "+
+					"connect-src 'self'; img-src 'self' data:; form-action 'self'; "+
+					"frame-ancestors 'none'; base-uri 'self'")
+			h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// cors restricts cross-origin requests to the single configured frontend origin.
+// Credentials (cookies) are allowed because session cookies travel on every request.
+func cors(allowedOrigin string) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", allowedOrigin)
+			h.Set("Access-Control-Allow-Credentials", "true")
+			h.Set("Vary", "Origin")
+
+			if r.Method == http.MethodOptions {
+				h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				h.Set("Access-Control-Allow-Headers", "Content-Type, X-Vault-CSRF")
+				h.Set("Access-Control-Max-Age", "86400")
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// requireCSRF rejects state-changing requests (POST/PUT/DELETE) that lack the
+// X-Vault-CSRF: 1 custom header. Browsers cannot send custom headers in
+// cross-origin requests without a CORS preflight, so this blocks CSRF even
+// when SameSite=Strict is not supported. GET/HEAD/OPTIONS are exempt.
+func requireCSRF() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet, http.MethodHead, http.MethodOptions:
+				next.ServeHTTP(w, r)
+				return
+			}
+			if r.Header.Get("X-Vault-CSRF") != "1" {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "CSRF check failed"})
+				return
+			}
+			next.ServeHTTP(w, r)
 		})
 	}
 }
 
 // userIDFromCtx extracts the acting user UUID from the request context.
 // Returns the zero UUID and false if not present (should only happen if a route
-// was wired without the auth guard — treat as a programming error).
+// was wired without sessionAuth — treat as a programming error).
 func userIDFromCtx(ctx context.Context) (uuid.UUID, bool) {
 	id, ok := ctx.Value(userIDKey).(uuid.UUID)
 	return id, ok

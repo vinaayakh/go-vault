@@ -9,15 +9,125 @@ info:
     **API versioning:** v0 endpoints live under `/api`. Breaking changes in later
     phases will use `/api/v1`. Document any breaking change before moving the prefix.
 
-    **Phase 0 → 2 progression:** health was the only live endpoint in Phase 0.
-    Phase 2 adds the full item CRUD, a sync snapshot, and a readiness probe.
-    Authentication (Phase 3) will replace the temporary `X-Dev-User` dev guard.
-  version: 0.2.0
+    **Phase 3:** real session authentication replaces the Phase 2 `X-Dev-User` dev
+    guard. Register derives the master key and auth hash client-side; the server
+    stores only a server-side Argon2id hash of the auth hash (zero-knowledge
+    invariant). Login issues a `vault_session` HttpOnly/Secure/SameSite=Strict cookie.
+  version: 0.3.0
 servers:
   - url: /
     description: Local development (served by cmd/server)
 
 paths:
+  /api/register:
+    post:
+      operationId: postRegister
+      summary: Register a new account
+      description: |
+        Accepts the email, KDF params, client-derived auth hash, and the
+        protected (wrapped) vault key. The server stores a server-side Argon2id
+        hash of the auth hash — it never sees the master password or key.
+
+        Returns a uniform 201 regardless of whether the email is already
+        registered to prevent account enumeration.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Account created (or email already exists — response is identical).
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/login:
+    post:
+      operationId: postLogin
+      summary: Authenticate and open a session
+      description: |
+        Accepts email + the client-derived auth hash. The server re-hashes the
+        auth hash server-side and compares with the stored value using
+        constant-time equality. On success, sets a `vault_session` session cookie
+        (HttpOnly, Secure, SameSite=Strict) and returns the protected symmetric
+        key + KDF params so the client can unlock the vault locally.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authenticated. Session cookie set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/logout:
+    post:
+      operationId: postLogout
+      summary: Revoke the current session
+      description: |
+        Revokes the session server-side and clears the `vault_session` cookie.
+        Requires a valid session cookie and the `X-Vault-CSRF: 1` header.
+      tags: [auth]
+      responses:
+        "204":
+          description: Session revoked. Cookie cleared.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/user:
+    delete:
+      operationId: deleteUser
+      summary: Delete the authenticated user's account
+      description: |
+        Revokes all sessions, then permanently deletes the user row and all
+        vault items (ON DELETE CASCADE). This is irreversible.
+      tags: [auth]
+      responses:
+        "204":
+          description: Account deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/user/key:
+    put:
+      operationId: putUserKey
+      summary: Rotate master password (update auth credentials and wrapped key)
+      description: |
+        Atomically updates the server-side auth hash, KDF params, and protected
+        symmetric key for a master-password change. The client re-derives
+        everything locally and sends only the new auth hash + new wrapped vault
+        key — the plaintext vault key and master key are never sent.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateKeyRequest"
+      responses:
+        "200":
+          description: Auth credentials and wrapped key updated.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /api/health:
     get:
       operationId: getHealth
@@ -61,8 +171,7 @@ paths:
       summary: List the caller's vault items (ciphertext only)
       description: |
         Returns every vault item belonging to the authenticated user as opaque
-        ciphertext + metadata. Requires `X-Dev-User` header in dev mode (Phase 2
-        temporary guard); Phase 3 replaces this with session auth.
+        ciphertext + metadata. Requires a valid `vault_session` cookie (Phase 3).
       tags: [items]
       responses:
         "200":
@@ -73,8 +182,8 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Item"
-        "403":
-          $ref: "#/components/responses/Forbidden"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
     post:
       operationId: createItem
       summary: Store a new encrypted vault item
@@ -97,8 +206,8 @@ paths:
                 $ref: "#/components/schemas/Item"
         "400":
           $ref: "#/components/responses/BadRequest"
-        "403":
-          $ref: "#/components/responses/Forbidden"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /api/items/{id}:
     parameters:
@@ -134,8 +243,8 @@ paths:
                 $ref: "#/components/schemas/Item"
         "400":
           $ref: "#/components/responses/BadRequest"
-        "403":
-          $ref: "#/components/responses/Forbidden"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -154,8 +263,8 @@ paths:
       responses:
         "204":
           description: Item deleted.
-        "403":
-          $ref: "#/components/responses/Forbidden"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -180,8 +289,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SyncResponse"
-        "403":
-          $ref: "#/components/responses/Forbidden"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
 components:
   responses:
@@ -191,14 +300,26 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or invalid session.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     Forbidden:
-      description: Missing or invalid authentication.
+      description: Action not permitted for the authenticated user.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     NotFound:
       description: Resource not found (or not owned by caller).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TooManyRequests:
+      description: Rate limit exceeded. Back off and retry later.
       content:
         application/json:
           schema:
@@ -335,6 +456,64 @@ components:
           items:
             $ref: "#/components/schemas/Item"
           description: Complete snapshot of all vault items (full-snapshot model, v0).
+
+    RegisterRequest:
+      type: object
+      required: [email, kdf_params, auth_hash, protected_symmetric_key]
+      properties:
+        email:
+          type: string
+          format: email
+          description: User's email address (normalized to lowercase before storage).
+        kdf_params:
+          $ref: "#/components/schemas/KDFParams"
+        auth_hash:
+          type: string
+          description: |
+            Base64-encoded (standard, padded) client-derived auth hash.
+            This is the OUTPUT of the second independent Argon2id pass
+            (DeriveAuthHash) — never the master password or master key.
+        protected_symmetric_key:
+          type: string
+          description: |
+            Base64-encoded AEAD-encrypted vault key (wrapped with the
+            stretched master key). Stored opaquely; returned at sync time.
+
+    LoginRequest:
+      type: object
+      required: [email, auth_hash]
+      properties:
+        email:
+          type: string
+          format: email
+        auth_hash:
+          type: string
+          description: Base64-encoded client-derived auth hash (same derivation as registration).
+
+    LoginResponse:
+      type: object
+      required: [protected_symmetric_key, kdf_params]
+      properties:
+        protected_symmetric_key:
+          type: string
+          description: |
+            Base64-encoded wrapped vault key. The client unwraps it with the
+            stretched master key to obtain the vault key for item decryption.
+        kdf_params:
+          $ref: "#/components/schemas/KDFParams"
+
+    UpdateKeyRequest:
+      type: object
+      required: [auth_hash, kdf_params, protected_symmetric_key]
+      properties:
+        auth_hash:
+          type: string
+          description: New base64-encoded client-derived auth hash (re-derived from new password).
+        kdf_params:
+          $ref: "#/components/schemas/KDFParams"
+        protected_symmetric_key:
+          type: string
+          description: New base64-encoded wrapped vault key (re-wrapped with new master key).
 
     Error:
       type: object

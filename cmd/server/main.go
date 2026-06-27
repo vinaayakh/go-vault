@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/vinaayakh/secure-vault/internal/api"
+	"github.com/vinaayakh/secure-vault/internal/auth"
 	"github.com/vinaayakh/secure-vault/internal/config"
 	"github.com/vinaayakh/secure-vault/internal/storage"
 )
@@ -30,8 +31,8 @@ func main() {
 	}
 }
 
-// run wires up config, database, and HTTP server, then blocks until an interrupt
-// triggers a graceful shutdown. It returns the first fatal error, or nil on clean exit.
+// run wires up config, database, auth manager, and HTTP server, then blocks
+// until an interrupt triggers a graceful shutdown.
 func run(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -48,9 +49,11 @@ func run(log *slog.Logger) error {
 	}
 	defer store.Close()
 
+	authMgr := auth.NewManager(store.Sessions, cfg.SessionDuration)
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           api.NewRouter(log, store, cfg),
+		Handler:           api.NewRouter(log, store, authMgr, cfg),
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
@@ -59,7 +62,7 @@ func run(log *slog.Logger) error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Info("ok", "addr", cfg.Addr, "app_env", cfg.AppEnv)
+		log.Info("ok", "addr", cfg.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}

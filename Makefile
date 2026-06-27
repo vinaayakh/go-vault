@@ -64,7 +64,11 @@ sec: ## Run govulncheck + gosec (Phase 0 task 0.4) — mirrors the CI vuln + lin
 	golangci-lint run --enable-only gosec
 
 wasm: ## Build the crypto core to WebAssembly (Phase 4)
-	@echo "TODO(phase-4): GOOS=js GOARCH=wasm go build -o web/public/crypto.wasm ./cmd/wasm"
+	GOOS=js GOARCH=wasm go build -o web/public/crypto.wasm ./cmd/wasm
+	@cp "$$(go env GOROOT)/misc/wasm/wasm_exec.js" web/public/ 2>/dev/null || \
+	 cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" web/public/
+	go run ./cmd/sri web/public/crypto.wasm > web/public/crypto.wasm.sri
+	@echo "Built crypto.wasm — SRI hash: $$(cat web/public/crypto.wasm.sri)"
 
 db-up: ## Start PostgreSQL via Docker Compose
 	docker compose -f deploy/docker-compose.yml up -d

@@ -8,6 +8,7 @@ coverage.*
 # ── WASM build output (Phase 4) ─────────────────────────────────────
 *.wasm
 /web/public/wasm_exec.js
+/web/public/crypto.wasm.sri
 
 # ── Node / frontend ─────────────────────────────────────────────────
 /web/node_modules/

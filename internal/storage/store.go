@@ -18,12 +18,13 @@ var ErrNotFound = errors.New("record not found")
 // The client must fetch the latest revision before retrying the update.
 var ErrConflict = errors.New("revision conflict: a newer version exists")
 
-// Store holds the Postgres connection pool and the two repository implementations.
+// Store holds the Postgres connection pool and the three repository implementations.
 // It is safe for concurrent use; the pool manages connections internally.
 type Store struct {
-	pool  *pgxpool.Pool
-	Users *UsersRepo
-	Items *ItemsRepo
+	pool     *pgxpool.Pool
+	Users    *UsersRepo
+	Items    *ItemsRepo
+	Sessions *SessionsRepo
 }
 
 // New opens a connection pool and pings the database to verify connectivity.
@@ -41,6 +42,7 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	s := &Store{pool: pool}
 	s.Users = &UsersRepo{pool: pool}
 	s.Items = &ItemsRepo{pool: pool}
+	s.Sessions = &SessionsRepo{pool: pool}
 	return s, nil
 }
 

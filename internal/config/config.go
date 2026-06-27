@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -28,14 +29,18 @@ type Config struct {
 	// if absent. Example: postgres://user:pass@localhost:5432/vault?sslmode=disable
 	DatabaseDSN string
 
-	// AppEnv distinguishes the deployment environment. Only "dev" enables the
-	// temporary dev-auth guard (Phase 2). Any other value (including "prod") is
-	// treated as production — the guard is hard-disabled regardless of DevAuth.
-	AppEnv string
+	// AllowedOrigin is the single frontend origin allowed by CORS.
+	// Defaults to http://localhost:5173 (Vite dev server).
+	AllowedOrigin string
 
-	// DevAuth enables the X-Dev-User guard ONLY when AppEnv == "dev".
-	// Hard-forced false in any non-dev environment (fail-closed).
-	DevAuth bool
+	// SecureCookies controls whether session cookies carry the Secure flag.
+	// Derived from AllowedOrigin: true when the origin is HTTPS, false for HTTP
+	// (allows cookie to be sent in plain-HTTP local dev flows).
+	SecureCookies bool
+
+	// SessionDuration is how long a session cookie is valid.
+	// Defaults to 24 hours.
+	SessionDuration time.Duration
 }
 
 // Load reads configuration from the environment, applies safe defaults, and
@@ -52,9 +57,16 @@ func Load() (*Config, error) {
 		return nil, errors.New("DATABASE_URL is required but not set")
 	}
 
-	appEnv := getenv("APP_ENV", "prod")
+	sessionDuration := 24 * time.Hour
+	if raw := os.Getenv("SESSION_DURATION"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("SESSION_DURATION must be a valid duration (e.g. 24h), got %q", raw)
+		}
+		sessionDuration = d
+	}
 
-	devAuth := appEnv == "dev" && os.Getenv("DEV_AUTH") == "on"
+	allowedOrigin := getenv("ALLOWED_ORIGIN", "http://localhost:5173")
 
 	cfg := &Config{
 		Addr:              ":" + port,
@@ -63,8 +75,9 @@ func Load() (*Config, error) {
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		DatabaseDSN:       dsn,
-		AppEnv:            appEnv,
-		DevAuth:           devAuth,
+		AllowedOrigin:     allowedOrigin,
+		SecureCookies:     strings.HasPrefix(allowedOrigin, "https://"),
+		SessionDuration:   sessionDuration,
 	}
 	return cfg, nil
 }

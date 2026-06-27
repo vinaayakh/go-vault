@@ -1,33 +1,313 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 
 	"github.com/vinaayakh/secure-vault/internal/api/gen"
+	"github.com/vinaayakh/secure-vault/internal/auth"
+	"github.com/vinaayakh/secure-vault/internal/crypto"
 	"github.com/vinaayakh/secure-vault/internal/storage"
 )
 
+const sessionMaxAge = 86400 // 24 hours in seconds
+
 // Server implements gen.ServerInterface — the set of handlers generated from
-// api/openapi.yaml. In Phase 2 it holds a logger and the storage layer;
-// Phase 3 will add a session/auth dependency.
+// api/openapi.yaml.
 type Server struct {
-	log   *slog.Logger
-	store *storage.Store
+	log           *slog.Logger
+	store         *storage.Store
+	auth          *auth.Manager
+	secureCookies bool
 }
 
 // NewServer constructs the API handler set.
-func NewServer(log *slog.Logger, store *storage.Store) *Server {
-	return &Server{log: log, store: store}
+func NewServer(log *slog.Logger, store *storage.Store, authMgr *auth.Manager, secureCookies bool) *Server {
+	return &Server{log: log, store: store, auth: authMgr, secureCookies: secureCookies}
 }
 
 // Ensure *Server satisfies the generated contract at compile time.
 var _ gen.ServerInterface = (*Server)(nil)
+
+// PostRegister implements POST /api/register.
+// Returns 201 regardless of email uniqueness to prevent account enumeration.
+func (s *Server) PostRegister(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	if !s.auth.CheckRegisterLimit(ip) {
+		writeJSON(w, http.StatusTooManyRequests, gen.Error{Error: "too many registration attempts; try again later"})
+		return
+	}
+
+	var body gen.RegisterRequest
+	if err := decodeJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: err.Error()})
+		return
+	}
+
+	email := crypto.NormalizeEmail(string(body.Email))
+	if email == "" {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: "email must not be empty"})
+		return
+	}
+
+	authHashBytes, err := base64.StdEncoding.DecodeString(body.AuthHash)
+	if err != nil || len(authHashBytes) == 0 {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: "auth_hash must be valid base64"})
+		return
+	}
+
+	if err := validateCiphertext(body.ProtectedSymmetricKey); err != nil {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: "protected_symmetric_key: " + err.Error()})
+		return
+	}
+
+	kdfJSON, err := json.Marshal(body.KdfParams)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: "invalid kdf_params"})
+		return
+	}
+
+	salt, err := crypto.NewServerSalt()
+	if err != nil {
+		s.logInternalError(r, "register: new salt", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+		return
+	}
+
+	serverHash, err := crypto.DeriveServerAuthHash(authHashBytes, salt, crypto.DefaultServerAuthParams())
+	if err != nil {
+		s.logInternalError(r, "register: derive server hash", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+		return
+	}
+
+	_, err = s.store.Users.Create(r.Context(), email, kdfJSON, serverHash, salt, body.ProtectedSymmetricKey)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// Unique constraint violation: email already registered.
+			// Return 201 silently to prevent account enumeration — the caller
+			// cannot distinguish "created" from "already exists".
+			s.log.Info("register: duplicate email suppressed",
+				"request_id", r.Context().Value(requestIDKey))
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		// Any other error (DB down, constraint mismatch, …) is a real failure.
+		s.logInternalError(r, "register: create user", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+}
+
+// PostLogin implements POST /api/login.
+func (s *Server) PostLogin(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+
+	var body gen.LoginRequest
+	if err := decodeJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: err.Error()})
+		return
+	}
+
+	email := crypto.NormalizeEmail(string(body.Email))
+
+	if !s.auth.CheckLoginLimit(ip, email) {
+		writeJSON(w, http.StatusTooManyRequests, gen.Error{Error: "too many login attempts; try again later"})
+		return
+	}
+
+	clientAuthHash, err := base64.StdEncoding.DecodeString(body.AuthHash)
+	if err != nil || len(clientAuthHash) == 0 {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: "auth_hash must be valid base64"})
+		return
+	}
+
+	user, err := s.store.Users.GetByEmail(r.Context(), email)
+	if errors.Is(err, storage.ErrNotFound) {
+		// Perform a dummy hash to equalize timing for unknown vs wrong-password.
+		dummySalt, _ := crypto.NewServerSalt()
+		_, _ = crypto.DeriveServerAuthHash(clientAuthHash, dummySalt, crypto.DefaultServerAuthParams())
+		writeJSON(w, http.StatusUnauthorized, gen.Error{Error: "invalid credentials"})
+		return
+	}
+	if err != nil {
+		s.logInternalError(r, "login: get user", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+		return
+	}
+
+	candidate, err := crypto.DeriveServerAuthHash(clientAuthHash, user.AuthHashSalt, crypto.DefaultServerAuthParams())
+	if err != nil {
+		s.logInternalError(r, "login: derive candidate hash", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+		return
+	}
+
+	if subtle.ConstantTimeCompare(candidate, user.AuthHash) != 1 {
+		writeJSON(w, http.StatusUnauthorized, gen.Error{Error: "invalid credentials"})
+		return
+	}
+
+	// Auth succeeded — clear rate-limit counters and create session.
+	s.auth.ResetLoginLimit(ip, email)
+
+	rawToken, err := s.auth.CreateSession(r.Context(), user.ID)
+	if err != nil {
+		s.logInternalError(r, "login: create session", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure is set via config (true in prod); HttpOnly + SameSite=Strict are always set
+		Name:     auth.CookieName,
+		Value:    rawToken,
+		Path:     "/",
+		MaxAge:   sessionMaxAge,
+		HttpOnly: true,
+		Secure:   s.secureCookies,
+		SameSite: http.SameSiteStrictMode,
+	})
+
+	var kdfParams gen.KDFParams
+	if err := json.Unmarshal(user.KDFParams, &kdfParams); err != nil {
+		s.logInternalError(r, "login: unmarshal kdf_params", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, gen.LoginResponse{
+		ProtectedSymmetricKey: user.ProtectedSymmetricKey,
+		KdfParams:             kdfParams,
+	})
+}
+
+// PostLogout implements POST /api/logout.
+func (s *Server) PostLogout(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie(auth.CookieName)
+	if err == nil {
+		if rErr := s.auth.RevokeSession(r.Context(), cookie.Value); rErr != nil {
+			s.logInternalError(r, "logout: revoke session", rErr)
+		}
+	}
+
+	// Clear cookie unconditionally.
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: see login handler comment
+		Name:     auth.CookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   s.secureCookies,
+		SameSite: http.SameSiteStrictMode,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// DeleteUser implements DELETE /api/user.
+func (s *Server) DeleteUser(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userIDFromCtx(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, gen.Error{Error: "authentication required"})
+		return
+	}
+
+	if err := s.auth.RevokeAllSessions(r.Context(), userID); err != nil {
+		s.logInternalError(r, "delete user: revoke sessions", err)
+	}
+
+	if err := s.store.Users.DeleteUser(r.Context(), userID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		s.logInternalError(r, "delete user", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "failed to delete account"})
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: see login handler comment
+		Name:     auth.CookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   s.secureCookies,
+		SameSite: http.SameSiteStrictMode,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// PutUserKey implements PUT /api/user/key — master-password rotation.
+func (s *Server) PutUserKey(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userIDFromCtx(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, gen.Error{Error: "authentication required"})
+		return
+	}
+
+	var body gen.UpdateKeyRequest
+	if err := decodeJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: err.Error()})
+		return
+	}
+
+	newAuthHashBytes, err := base64.StdEncoding.DecodeString(body.AuthHash)
+	if err != nil || len(newAuthHashBytes) == 0 {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: "auth_hash must be valid base64"})
+		return
+	}
+
+	if err := validateCiphertext(body.ProtectedSymmetricKey); err != nil {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: "protected_symmetric_key: " + err.Error()})
+		return
+	}
+
+	newSalt, err := crypto.NewServerSalt()
+	if err != nil {
+		s.logInternalError(r, "key rotation: new salt", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+		return
+	}
+
+	newServerHash, err := crypto.DeriveServerAuthHash(newAuthHashBytes, newSalt, crypto.DefaultServerAuthParams())
+	if err != nil {
+		s.logInternalError(r, "key rotation: derive hash", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+		return
+	}
+
+	kdfJSON, err := json.Marshal(body.KdfParams)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: "invalid kdf_params"})
+		return
+	}
+
+	if _, err := s.store.Users.UpdateAuthCredentials(r.Context(), userID, newServerHash, newSalt, kdfJSON, body.ProtectedSymmetricKey); err != nil {
+		s.logInternalError(r, "key rotation: update credentials", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "failed to update credentials"})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// clientIP extracts the real client IP from RemoteAddr, stripping the port.
+// For production deployments behind a reverse proxy, extend this to read
+// X-Forwarded-For or X-Real-IP (after validating the proxy is trusted).
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
 
 // GetHealth implements GET /api/health — a no-auth liveness probe.
 func (s *Server) GetHealth(w http.ResponseWriter, r *http.Request) {

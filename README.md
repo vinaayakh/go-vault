@@ -101,6 +101,10 @@ npm --prefix web run dev     # or: make web
 # → http://localhost:5173
 ```
 
+> **Secure context:** `localhost` is treated as a secure context by modern browsers, so
+> `crypto.getRandomValues`, WebAssembly crypto, and the clipboard API work over plain HTTP
+> during local development. For non-localhost dev hosts, serve the frontend over HTTPS.
+
 > On Windows without `make`, run the commands in the right-hand column above directly — they
 > are exactly what each `make` target invokes (see the [Makefile](Makefile)).
 
@@ -136,7 +140,7 @@ go test -race -tags integration ./...
 # TypeScript type check
 npm --prefix web run typecheck
 
-# Playwright E2E (zero-knowledge assertions — requires running stack)
+# Playwright E2E (zero-knowledge + XSS assertions — requires running stack)
 npm --prefix web run test:e2e
 ```
 

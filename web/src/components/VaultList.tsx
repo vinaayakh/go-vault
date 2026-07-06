@@ -47,6 +47,10 @@ export function VaultList() {
     setItems((prev) => prev.filter((i) => i.id !== id));
   };
 
+  const handleItemUpdated = (updated: Item) => {
+    setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
+  };
+
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", padding: "1.5rem", maxWidth: "680px", margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.25rem" }}>
@@ -71,7 +75,12 @@ export function VaultList() {
             <p style={{ color: "#666" }}>No items yet. Click "+ Add Item" to store your first secret.</p>
           ) : (
             items.map((item) => (
-              <ItemCard key={item.id} item={item} onDeleted={handleItemDeleted} />
+              <ItemCard
+                key={item.id}
+                item={item}
+                onDeleted={handleItemDeleted}
+                onUpdated={handleItemUpdated}
+              />
             ))
           )}
         </div>

@@ -10,6 +10,7 @@ export type UpdateItem = components["schemas"]["UpdateItem"];
 export type RegisterRequest = components["schemas"]["RegisterRequest"];
 export type LoginRequest = components["schemas"]["LoginRequest"];
 export type LoginResponse = components["schemas"]["LoginResponse"];
+export type LoginKdfParamsResponse = components["schemas"]["LoginKdfParamsResponse"];
 export type SyncResponse = components["schemas"]["SyncResponse"];
 export type UpdateKeyRequest = components["schemas"]["UpdateKeyRequest"];
 
@@ -79,6 +80,9 @@ export const api = {
   register: (req: RegisterRequest) => postJSON<void>("/api/register", req),
 
   login: (req: LoginRequest) => postJSON<LoginResponse>("/api/login", req),
+
+  getLoginKdfParams: (email: string) =>
+    getJSON<LoginKdfParamsResponse>(`/api/login/kdf-params?email=${encodeURIComponent(email)}`),
 
   logout: () => postJSON<void>("/api/logout", {}),
 

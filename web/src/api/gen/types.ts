@@ -29,6 +29,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/login/kdf-params": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fetch KDF params before login
+         * @description Returns the Argon2id cost parameters stored for the account so the
+         *     client can derive the auth hash locally before calling POST /api/login.
+         *     When the email is unknown, returns the default parameters (with equalized
+         *     timing) to prevent account enumeration.
+         */
+        get: operations["getLoginKdfParams"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/login": {
         parameters: {
             query?: never;
@@ -374,6 +397,9 @@ export interface components {
             protected_symmetric_key: string;
             kdf_params: components["schemas"]["KDFParams"];
         };
+        LoginKdfParamsResponse: {
+            kdf_params: components["schemas"]["KDFParams"];
+        };
         UpdateKeyRequest: {
             /** @description New base64-encoded client-derived auth hash (re-derived from new password). */
             auth_hash: string;
@@ -471,6 +497,29 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             429: components["responses"]["TooManyRequests"];
+        };
+    };
+    getLoginKdfParams: {
+        parameters: {
+            query: {
+                email: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description KDF parameters for the account (or defaults if unknown). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginKdfParamsResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
         };
     };
     postLogin: {

@@ -45,6 +45,33 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
+  /api/login/kdf-params:
+    get:
+      operationId: getLoginKdfParams
+      summary: Fetch KDF params before login
+      description: |
+        Returns the Argon2id cost parameters stored for the account so the
+        client can derive the auth hash locally before calling POST /api/login.
+        When the email is unknown, returns the default parameters (with equalized
+        timing) to prevent account enumeration.
+      tags: [auth]
+      parameters:
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+            format: email
+      responses:
+        "200":
+          description: KDF parameters for the account (or defaults if unknown).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginKdfParamsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
   /api/login:
     post:
       operationId: postLogin
@@ -499,6 +526,13 @@ components:
           description: |
             Base64-encoded wrapped vault key. The client unwraps it with the
             stretched master key to obtain the vault key for item decryption.
+        kdf_params:
+          $ref: "#/components/schemas/KDFParams"
+
+    LoginKdfParamsResponse:
+      type: object
+      required: [kdf_params]
+      properties:
         kdf_params:
           $ref: "#/components/schemas/KDFParams"
 

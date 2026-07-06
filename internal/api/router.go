@@ -20,7 +20,7 @@ import (
 // Routing strategy (Go 1.22 ServeMux):
 //   - More-specific patterns beat less-specific ones, so unguarded routes
 //     registered on the outer mux win over the guarded /api/ subtree.
-//   - Health + ready + register + login are unguarded (no auth required).
+//   - Health + ready + register + login + login/kdf-params are unguarded (no auth required).
 //   - Items, sync, logout, and user routes are guarded by sessionAuth.
 //   - State-changing routes additionally require the X-Vault-CSRF: 1 header.
 func NewRouter(log *slog.Logger, store *storage.Store, authMgr *auth.Manager, cfg *config.Config) http.Handler {
@@ -38,6 +38,7 @@ func NewRouter(log *slog.Logger, store *storage.Store, authMgr *auth.Manager, cf
 		http.HandlerFunc(srv.PostRegister),
 		requireCSRF(),
 	).ServeHTTP)
+	mux.HandleFunc("GET /api/login/kdf-params", http.HandlerFunc(srv.getLoginKdfParams))
 	mux.HandleFunc("POST /api/login", chain(
 		http.HandlerFunc(srv.PostLogin),
 		requireCSRF(),
@@ -118,7 +119,7 @@ func serveSpec(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, decoded)
 }
 
-// serveSwaggerUI renders Swagger UI pointed at /openapi.json.
+// withItemID adapts handlers that require a UUID path parameter to the standard
 //
 // Assets are loaded from a version-pinned CDN for Phase 0 simplicity. Phase 5
 // (hardening) should vendor swagger-ui-dist locally and add Subresource Integrity

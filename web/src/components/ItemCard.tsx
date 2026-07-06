@@ -4,20 +4,23 @@ import { getCrypto } from "../crypto/service";
 import type { PlainItem } from "../crypto/service";
 import type { Item } from "../api/client";
 import { useVault } from "../context/VaultContext";
+import { EditItemModal } from "./EditItemModal";
 
 interface Props {
   item: Item;
   onDeleted: (id: string) => void;
+  onUpdated: (item: Item) => void;
 }
 
 type RevealState = "hidden" | "revealing" | "shown" | "error";
 
-export function ItemCard({ item, onDeleted }: Props) {
+export function ItemCard({ item, onDeleted, onUpdated }: Props) {
   const { vaultKey } = useVault();
   const [revealState, setRevealState] = useState<RevealState>("hidden");
   const [plain, setPlain] = useState<PlainItem | null>(null);
   const [copied, setCopied] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [error, setError] = useState("");
 
   const handleReveal = async () => {
@@ -82,10 +85,13 @@ export function ItemCard({ item, onDeleted }: Props) {
           )}
         </div>
         <div style={{ display: "flex", gap: "0.5rem" }}>
-          <button onClick={handleReveal} disabled={revealState === "revealing" || deleting}>
+          <button onClick={handleReveal} disabled={revealState === "revealing" || deleting || editing}>
             {revealState === "shown" ? "Hide" : revealState === "revealing" ? "…" : "Reveal"}
           </button>
-          <button onClick={handleDelete} disabled={deleting} style={{ color: "crimson" }}>
+          <button onClick={() => setEditing(true)} disabled={deleting || editing}>
+            Edit
+          </button>
+          <button onClick={handleDelete} disabled={deleting || editing} style={{ color: "crimson" }}>
             {deleting ? "Deleting…" : "Delete"}
           </button>
         </div>
@@ -110,6 +116,19 @@ export function ItemCard({ item, onDeleted }: Props) {
       )}
 
       {error && <p style={{ color: "crimson", marginTop: "0.5rem", fontSize: "0.9rem" }}>{error}</p>}
+
+      {editing && (
+        <EditItemModal
+          item={item}
+          onClose={() => setEditing(false)}
+          onUpdated={(updated) => {
+            setEditing(false);
+            setRevealState("hidden");
+            setPlain(null);
+            onUpdated(updated);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -109,6 +109,63 @@ func (s *Server) PostRegister(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 }
 
+// GetLoginKdfParams implements GET /api/login/kdf-params.
+// Returns stored KDF parameters for the account, or defaults when unknown
+// (with equalized timing) so clients can derive the auth hash before login.
+func (s *Server) GetLoginKdfParams(w http.ResponseWriter, r *http.Request, params gen.GetLoginKdfParamsParams) {
+	email := crypto.NormalizeEmail(string(params.Email))
+	if email == "" {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: "email must not be empty"})
+		return
+	}
+
+	user, err := s.store.Users.GetByEmail(r.Context(), email)
+	if errors.Is(err, storage.ErrNotFound) {
+		// Equalize timing for unknown emails — same dummy work as failed login.
+		dummySalt, _ := crypto.NewServerSalt()
+		_, _ = crypto.DeriveServerAuthHash(make([]byte, 32), dummySalt, crypto.DefaultServerAuthParams())
+		writeJSON(w, http.StatusOK, gen.LoginKdfParamsResponse{KdfParams: defaultGenKDFParams()})
+		return
+	}
+	if err != nil {
+		s.logInternalError(r, "login kdf-params: get user", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+		return
+	}
+
+	var kdfParams gen.KDFParams
+	if err := json.Unmarshal(user.KDFParams, &kdfParams); err != nil {
+		s.logInternalError(r, "login kdf-params: unmarshal kdf_params", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, gen.LoginKdfParamsResponse{KdfParams: kdfParams})
+}
+
+func defaultGenKDFParams() gen.KDFParams {
+	p := crypto.DefaultKDFParams()
+	return gen.KDFParams{
+		Type:        p.Type,
+		Version:     int(p.Version),
+		MemoryKib:   int(p.MemoryKiB),
+		Iterations:  int(p.Iterations),
+		Parallelism: int(p.Parallelism),
+	}
+}
+
+// getLoginKdfParams adapts the generated handler signature to http.HandlerFunc.
+func (s *Server) getLoginKdfParams(w http.ResponseWriter, r *http.Request) {
+	email := r.URL.Query().Get("email")
+	if email == "" {
+		writeJSON(w, http.StatusBadRequest, gen.Error{Error: "email query parameter is required"})
+		return
+	}
+	s.GetLoginKdfParams(w, r, gen.GetLoginKdfParamsParams{
+		Email: openapi_types.Email(email),
+	})
+}
+
 // PostLogin implements POST /api/login.
 func (s *Server) PostLogin(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)

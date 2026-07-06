@@ -68,6 +68,23 @@ export const DEFAULT_KDF_PARAMS: KDFParams = {
   parallelism: 1,
 };
 
+/** Map OpenAPI KDF params to the crypto service shape. */
+export function toCryptoKdfParams(api: {
+  type: string;
+  version: number;
+  memory_kib: number;
+  iterations: number;
+  parallelism: number;
+}): KDFParams {
+  return {
+    type: api.type,
+    version: api.version,
+    memory_kib: api.memory_kib,
+    iterations: api.iterations,
+    parallelism: api.parallelism,
+  };
+}
+
 let _instance: CryptoService | null = null;
 let _loading: Promise<CryptoService> | null = null;
 

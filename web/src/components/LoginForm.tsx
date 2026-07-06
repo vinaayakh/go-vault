@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { api } from "../api/client";
-import { getCrypto, DEFAULT_KDF_PARAMS } from "../crypto/service";
+import { getCrypto, toCryptoKdfParams } from "../crypto/service";
 import { useVault } from "../context/VaultContext";
 
-type LoginState = "idle" | "deriving" | "authenticating" | "error";
+type LoginState = "idle" | "fetching" | "deriving" | "authenticating" | "error";
 
 export function LoginForm() {
   const { setVaultKey } = useVault();
@@ -12,24 +12,33 @@ export function LoginForm() {
   const [state, setState] = useState<LoginState>("idle");
   const [error, setError] = useState("");
 
-  const busy = state === "deriving" || state === "authenticating";
+  const busy = state === "fetching" || state === "deriving" || state === "authenticating";
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
 
     try {
+      setState("fetching");
+      const { kdf_params: kdfParams } = await api.getLoginKdfParams(email);
+      const cryptoParams = toCryptoKdfParams(kdfParams);
+
       setState("deriving");
       const crypto = await getCrypto();
 
-      // Derive master key and auth hash from the master password.
-      // This calls Argon2id twice and may freeze the UI for 1–3 s each —
-      // the loading label below keeps the user informed.
-      const masterKeyB64 = crypto.deriveMasterKey(password, email, DEFAULT_KDF_PARAMS);
-      const authHashB64 = crypto.deriveAuthHash(masterKeyB64, password, DEFAULT_KDF_PARAMS);
+      // Derive master key and auth hash from the master password using the
+      // server-stored KDF parameters (fetched before login).
+      const masterKeyB64 = crypto.deriveMasterKey(password, email, cryptoParams);
+      const authHashB64 = crypto.deriveAuthHash(masterKeyB64, password, cryptoParams);
 
       setState("authenticating");
       const resp = await api.login({ email, auth_hash: authHashB64 });
+
+      // Confirm the server returned the same KDF params we used for derivation.
+      const serverParams = toCryptoKdfParams(resp.kdf_params);
+      if (JSON.stringify(serverParams) !== JSON.stringify(cryptoParams)) {
+        throw new Error("KDF parameters changed during login. Please try again.");
+      }
 
       // Unwrap the vault key locally — the server never sees it.
       const { encKey: encKeyB64 } = crypto.stretchMasterKey(masterKeyB64);
@@ -78,11 +87,13 @@ export function LoginForm() {
       </div>
       {error && <p style={{ color: "crimson", marginBottom: "1rem" }}>{error}</p>}
       <button type="submit" disabled={busy} style={{ padding: "0.5rem 1.5rem" }}>
-        {state === "deriving"
-          ? "Deriving keys… (may take a moment)"
-          : state === "authenticating"
-            ? "Authenticating…"
-            : "Log In"}
+        {state === "fetching"
+          ? "Loading account parameters…"
+          : state === "deriving"
+            ? "Deriving keys… (may take a moment)"
+            : state === "authenticating"
+              ? "Authenticating…"
+              : "Log In"}
       </button>
     </form>
   );

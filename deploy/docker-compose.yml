@@ -5,7 +5,6 @@ services:
       POSTGRES_USER: vault_root
       POSTGRES_PASSWORD: ${POSTGRES_ROOT_PASSWORD:-devpassword}
       POSTGRES_DB: vault
-      # Init script creates the least-privilege app role.
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
     ports:
       - "5432:5432"
@@ -17,6 +16,27 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://vault_app:${POSTGRES_APP_PASSWORD:-apppassword}@postgres:5432/vault?sslmode=disable
+      ALLOWED_ORIGIN: http://localhost:5173
+      PORT: "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   postgres_data:

@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { getCrypto, DEFAULT_KDF_PARAMS } from "../crypto/service";
+import { checkBreached, scorePassword } from "../lib/password-health";
 
 type RegisterState = "idle" | "deriving" | "registering" | "done" | "error";
 
@@ -11,9 +12,23 @@ interface Props {
 export function RegisterForm({ onRegistered }: Props) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [state, setState] = useState<RegisterState>("idle");
   const [error, setError] = useState("");
+  const [strength, setStrength] = useState(scorePassword(""));
+  const [breachCount, setBreachCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    setStrength(scorePassword(password));
+    if (!password) {
+      setBreachCount(null);
+      return;
+    }
+    const t = setTimeout(() => {
+      void checkBreached(password).then(setBreachCount).catch(() => setBreachCount(null));
+    }, 400);
+    return () => clearTimeout(t);
+  }, [password]);
 
   const busy = state === "deriving" || state === "registering";
 
@@ -21,13 +36,17 @@ export function RegisterForm({ onRegistered }: Props) {
     e.preventDefault();
     setError("");
 
-    if (password !== confirm) {
+    if (password !== confirmPassword) {
       setError("Passwords do not match.");
       return;
     }
     if (password.length < 12) {
       setError("Master password must be at least 12 characters.");
       return;
+    }
+    if (breachCount !== null && breachCount > 0) {
+      const ok = confirm(`This password appears in ${breachCount} known breaches. Use it anyway?`);
+      if (!ok) return;
     }
 
     try {
@@ -53,7 +72,7 @@ export function RegisterForm({ onRegistered }: Props) {
 
       // Drop passwords from state immediately.
       setPassword("");
-      setConfirm("");
+      setConfirmPassword("");
 
       setState("done");
       onRegistered();
@@ -93,14 +112,22 @@ export function RegisterForm({ onRegistered }: Props) {
             style={{ display: "block", width: "100%", padding: "0.5rem", marginTop: "0.25rem" }}
           />
         </label>
+        {password && (
+          <p style={{ fontSize: "0.85rem", margin: "0.25rem 0 0", color: strength.score >= 3 ? "green" : "#666" }}>
+            Strength: {strength.label}
+            {breachCount !== null && breachCount > 0 && (
+              <span style={{ color: "crimson" }}> — found in {breachCount} breaches</span>
+            )}
+          </p>
+        )}
       </div>
       <div style={{ marginBottom: "1rem" }}>
         <label style={{ display: "block" }}>
           Confirm Password
           <input
             type="password"
-            value={confirm}
-            onChange={(e) => setConfirm(e.target.value)}
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
             required
             disabled={busy}
             autoComplete="new-password"
@@ -118,6 +145,7 @@ export function RegisterForm({ onRegistered }: Props) {
       </button>
       <p style={{ fontSize: "0.85rem", color: "#666", marginTop: "1rem" }}>
         Your master password is never sent to the server. If you lose it, your vault cannot be recovered.
+        See <a href="/docs/recovery" onClick={(e) => { e.preventDefault(); window.open("https://github.com/vinaayakh/secure-vault/blob/main/docs/RECOVERY.md"); }}>recovery policy</a>.
       </p>
     </form>
   );

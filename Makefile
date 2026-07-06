@@ -8,7 +8,7 @@ PKG     := ./...
 -include .env
 export
 
-.PHONY: help build run test test-integration generate openapi web web-build web-install web-lint lint fmt sec wasm clean tools precommit db-up db-down migrate-up migrate-down sqlc grant-app-role
+.PHONY: help build run test test-integration generate openapi web web-build web-install web-lint lint fmt sec fuzz clean tools precommit db-up db-down migrate-up migrate-down sqlc grant-app-role
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -62,6 +62,10 @@ lint: ## Run golangci-lint (config in .golangci.yml)
 sec: ## Run govulncheck + gosec (Phase 0 task 0.4) — mirrors the CI vuln + lint jobs
 	go run golang.org/x/vuln/cmd/govulncheck@latest $(PKG)
 	golangci-lint run --enable-only gosec
+
+fuzz: ## Run crypto + API fuzz tests (60s each)
+	go test -fuzz=FuzzOpen -fuzztime=60s ./internal/crypto/...
+	go test -fuzz=FuzzDecodeJSON -fuzztime=60s ./internal/api/...
 
 wasm: ## Build the crypto core to WebAssembly (Phase 4)
 	GOOS=js GOARCH=wasm go build -o web/public/crypto.wasm ./cmd/wasm

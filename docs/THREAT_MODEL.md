@@ -1,7 +1,7 @@
 # Secure Vault — Threat Model
 
 > **Status:** Living document — STRIDE pass updated through Phase 4.
-> **Last updated:** 2026-06-27.
+> **Last updated:** 2026-07-06.
 > **Scope:** the secure-vault zero-knowledge password manager (server, database, web client).
 
 This document is revised as the system grows. Each later phase has a checklist item to update
@@ -30,7 +30,7 @@ achieve against each component and to record the controls that defend the system
 - A fully compromised client device (malware, keylogger, hostile browser extension).
 - Account recovery / key escrow beyond what Phase 3 defines (lose the master password ⇒ lose
   the vault — this is intentional).
-- Secure sharing between users (deferred to Phase 5).
+- Secure sharing between users (deferred post–Phase 5).
 
 ---
 
@@ -155,7 +155,7 @@ server middleware, the contract); planned controls are tagged with their phase.
 |---|---|---|---|
 | Modify ciphertext at rest or in transit | Vault items | AEAD (XChaCha20-Poly1305) — any bit flip fails authentication on `Open` | ✅ in place (`internal/crypto`, tamper- + fuzz-tested) |
 | Tamper with KDF params to weaken derivation | KDF params | Versioned params validated on use (`KDFParams.validate`, `:v1:` HKDF labels), never silently reinterpreted; binding to the user row lands in Phase 2 | ✅ Phase 1 (versioning/validation) / 🔜 Phase 2 (bound to user row) |
-| Malicious dependency or poisoned image | Supply chain | `govulncheck`, Trivy image scan, Dependabot, SBOM (syft), gosec/CodeQL/semgrep in CI | ✅ in place (Dependabot 🔜 0.5) |
+| Malicious dependency or poisoned image | Supply chain | `govulncheck`, Trivy, Dependabot, SBOM (syft), cosign signing + SLSA provenance on release, gosec/CodeQL/semgrep in CI | ✅ Phase 5 |
 | Cross-site request forces a state change | Browser↔Server | SameSite=Strict cookie (primary) + `X-Vault-CSRF: 1` custom header check on all state-changing routes (secondary) | ✅ Phase 3 |
 
 ### Repudiation (accountability)
@@ -163,7 +163,7 @@ server middleware, the contract); planned controls are tagged with their phase.
 | Threat | Asset / boundary | Mitigation | Status |
 |---|---|---|---|
 | User/attacker denies an action | Server | Structured request logging with request IDs (`internal/api/middleware.go`); no secrets logged | ✅ baseline in place |
-| No durable record of security-relevant events | Server/DB | Append-only audit log (logins, item changes, key rotations) | 🔜 Phase 5 |
+| No durable record of security-relevant events | Server/DB | Append-only `audit_events` table; metadata-only events; user activity API | ✅ Phase 5 |
 
 ### Information disclosure (confidentiality)
 
@@ -404,15 +404,21 @@ could still serve modified JS — see §10 for the accepted residual risk.
 
 **Out of scope for v1:**
 
-- Account recovery / key escrow — losing the master password means losing the vault, by design.
-- Secure item sharing between users (Phase 5).
+- Account recovery / key escrow — losing the master password means losing the vault, by design ([RECOVERY.md](RECOVERY.md)).
+- Secure item sharing between users (deferred post–Phase 5).
 - A fully malicious server operator who modifies the served **JS bundle** to exfiltrate keys
-  at runtime — Subresource Integrity on `crypto.wasm` prevents tampered WASM binary, but the
-  React/JS entry point cannot self-attest. Signed releases and a browser extension could close
-  this gap (Phase 5 candidate).
+  at runtime — Subresource Integrity on `crypto.wasm` prevents tampered WASM binary; signed
+  container releases (cosign) and vendored Swagger UI remain future hardening.
 - Side-channel attacks against the host (timing, cache, power) beyond constant-time comparisons
   in the crypto path.
-- Hardware security modules / passkeys (TOTP 2FA arrives in Phase 5).
+- Hardware security modules / passkeys (WebAuthn stretch goal; TOTP 2FA implemented Phase 5).
+
+**Phase 5 additions (in scope):**
+
+- TOTP 2FA with vault-key-wrapped secret at rest; recovery codes hashed server-side.
+- Client-side HIBP breach check (k-anonymity; only 5-char SHA-1 prefix leaves the browser).
+- Encrypted vault export/import format ([EXPORT_FORMAT.md](EXPORT_FORMAT.md)).
+- OWASP ZAP baseline in CI; API + crypto fuzzing.
 
 ---
 

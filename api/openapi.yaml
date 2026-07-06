@@ -13,7 +13,7 @@ info:
     guard. Register derives the master key and auth hash client-side; the server
     stores only a server-side Argon2id hash of the auth hash (zero-knowledge
     invariant). Login issues a `vault_session` HttpOnly/Secure/SameSite=Strict cookie.
-  version: 0.3.0
+  version: 0.4.0
 servers:
   - url: /
     description: Local development (served by cmd/server)
@@ -103,6 +103,36 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
+  /api/login/mfa:
+    post:
+      operationId: postLoginMfa
+      summary: Complete login with TOTP or recovery code
+      description: |
+        Second step after POST /api/login when `mfa_required` is true. Validates
+        the TOTP code (server-side via the client-supplied secret over TLS) or a
+        single-use recovery code. On success, sets the session cookie and returns
+        the vault unlock material.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginMfaRequest"
+      responses:
+        "200":
+          description: MFA verified. Session cookie set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
   /api/logout:
     post:
       operationId: postLogout
@@ -152,6 +182,110 @@ paths:
           description: Auth credentials and wrapped key updated.
         "400":
           $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/user/2fa/enroll:
+    post:
+      operationId: postUser2faEnroll
+      summary: Enable TOTP two-factor authentication
+      description: |
+        Stores the vault-key-wrapped TOTP secret and validates the first code.
+        Returns single-use recovery codes (shown once).
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Enroll2faRequest"
+      responses:
+        "200":
+          description: 2FA enabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Enroll2faResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/user/2fa:
+    delete:
+      operationId: deleteUser2fa
+      summary: Disable TOTP two-factor authentication
+      description: |
+        Disables 2FA after verifying the current TOTP code or a recovery code.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Disable2faRequest"
+      responses:
+        "204":
+          description: 2FA disabled.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/user/2fa/recovery-codes:
+    post:
+      operationId: postUser2faRecoveryCodes
+      summary: Regenerate recovery codes
+      description: |
+        Replaces all recovery codes. Requires a valid TOTP code. Returns the
+        new codes once (plaintext).
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegenerateRecoveryCodesRequest"
+      responses:
+        "200":
+          description: New recovery codes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryCodesResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/activity:
+    get:
+      operationId: getActivity
+      summary: Recent security activity for the authenticated user
+      description: |
+        Returns metadata-only audit events (no secrets). Paginated by cursor.
+      tags: [activity]
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor (event id).
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Activity events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivityResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -468,7 +602,7 @@ components:
 
     SyncResponse:
       type: object
-      required: [protected_symmetric_key, kdf_params, items]
+      required: [protected_symmetric_key, kdf_params, items, totp_enabled]
       properties:
         protected_symmetric_key:
           type: string
@@ -478,6 +612,11 @@ components:
             vault key used to decrypt items.
         kdf_params:
           $ref: "#/components/schemas/KDFParams"
+        totp_enabled:
+          type: boolean
+        protected_totp_secret:
+          type: string
+          description: Vault-key-wrapped TOTP secret (present when totp_enabled).
         items:
           type: array
           items:
@@ -519,8 +658,16 @@ components:
 
     LoginResponse:
       type: object
-      required: [protected_symmetric_key, kdf_params]
       properties:
+        mfa_required:
+          type: boolean
+          description: When true, complete login via POST /api/login/mfa.
+        mfa_token:
+          type: string
+          description: Short-lived token for the MFA step (present when mfa_required).
+        protected_totp_secret:
+          type: string
+          description: Vault-key-wrapped TOTP secret (present when mfa_required).
         protected_symmetric_key:
           type: string
           description: |
@@ -528,6 +675,114 @@ components:
             stretched master key to obtain the vault key for item decryption.
         kdf_params:
           $ref: "#/components/schemas/KDFParams"
+        totp_enabled:
+          type: boolean
+          description: Whether the account has 2FA enabled (sync snapshot).
+
+    LoginMfaRequest:
+      type: object
+      required: [mfa_token]
+      properties:
+        mfa_token:
+          type: string
+        totp_code:
+          type: string
+          description: Six-digit TOTP code (required unless recovery_code is set).
+        totp_secret:
+          type: string
+          description: |
+            Base32 TOTP secret (client-unwrapped from protected_totp_secret).
+            Sent over TLS for server verification; never stored in plaintext.
+        recovery_code:
+          type: string
+          description: Single-use recovery code (alternative to totp_code).
+
+    Enroll2faRequest:
+      type: object
+      required: [protected_totp_secret, totp_secret, totp_code]
+      properties:
+        protected_totp_secret:
+          type: string
+          description: Vault-key-wrapped TOTP secret (stored at rest).
+        totp_secret:
+          type: string
+          description: Plaintext secret for server-side enrollment validation only.
+        totp_code:
+          type: string
+          description: First TOTP code to confirm setup.
+
+    Enroll2faResponse:
+      type: object
+      required: [recovery_codes]
+      properties:
+        recovery_codes:
+          type: array
+          items:
+            type: string
+
+    Disable2faRequest:
+      type: object
+      properties:
+        totp_code:
+          type: string
+        totp_secret:
+          type: string
+        recovery_code:
+          type: string
+
+    RegenerateRecoveryCodesRequest:
+      type: object
+      required: [totp_code, totp_secret]
+      properties:
+        totp_code:
+          type: string
+        totp_secret:
+          type: string
+
+    RecoveryCodesResponse:
+      type: object
+      required: [recovery_codes]
+      properties:
+        recovery_codes:
+          type: array
+          items:
+            type: string
+
+    ActivityEvent:
+      type: object
+      required: [id, event_type, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+        ip:
+          type: string
+        user_agent:
+          type: string
+        resource_id:
+          type: string
+          format: uuid
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+
+    ActivityResponse:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActivityEvent"
+        next_cursor:
+          type: string
+          format: uuid
+          description: Present when more events exist.
 
     LoginKdfParamsResponse:
       type: object

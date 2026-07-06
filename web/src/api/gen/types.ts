@@ -76,6 +76,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/login/mfa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Complete login with TOTP or recovery code
+         * @description Second step after POST /api/login when `mfa_required` is true. Validates
+         *     the TOTP code (server-side via the client-supplied secret over TLS) or a
+         *     single-use recovery code. On success, sets the session cookie and returns
+         *     the vault unlock material.
+         */
+        post: operations["postLoginMfa"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/logout": {
         parameters: {
             query?: never;
@@ -134,6 +157,88 @@ export interface paths {
          *     key — the plaintext vault key and master key are never sent.
          */
         put: operations["putUserKey"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/user/2fa/enroll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enable TOTP two-factor authentication
+         * @description Stores the vault-key-wrapped TOTP secret and validates the first code.
+         *     Returns single-use recovery codes (shown once).
+         */
+        post: operations["postUser2faEnroll"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/user/2fa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Disable TOTP two-factor authentication
+         * @description Disables 2FA after verifying the current TOTP code or a recovery code.
+         */
+        delete: operations["deleteUser2fa"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/user/2fa/recovery-codes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Regenerate recovery codes
+         * @description Replaces all recovery codes. Requires a valid TOTP code. Returns the
+         *     new codes once (plaintext).
+         */
+        post: operations["postUser2faRecoveryCodes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Recent security activity for the authenticated user
+         * @description Returns metadata-only audit events (no secrets). Paginated by cursor.
+         */
+        get: operations["getActivity"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -361,6 +466,9 @@ export interface components {
              */
             protected_symmetric_key: string;
             kdf_params: components["schemas"]["KDFParams"];
+            totp_enabled: boolean;
+            /** @description Vault-key-wrapped TOTP secret (present when totp_enabled). */
+            protected_totp_secret?: string;
             /** @description Complete snapshot of all vault items (full-snapshot model, v0). */
             items: components["schemas"]["Item"][];
         };
@@ -390,12 +498,77 @@ export interface components {
             auth_hash: string;
         };
         LoginResponse: {
+            /** @description When true, complete login via POST /api/login/mfa. */
+            mfa_required?: boolean;
+            /** @description Short-lived token for the MFA step (present when mfa_required). */
+            mfa_token?: string;
+            /** @description Vault-key-wrapped TOTP secret (present when mfa_required). */
+            protected_totp_secret?: string;
             /**
              * @description Base64-encoded wrapped vault key. The client unwraps it with the
              *     stretched master key to obtain the vault key for item decryption.
              */
-            protected_symmetric_key: string;
-            kdf_params: components["schemas"]["KDFParams"];
+            protected_symmetric_key?: string;
+            kdf_params?: components["schemas"]["KDFParams"];
+            /** @description Whether the account has 2FA enabled (sync snapshot). */
+            totp_enabled?: boolean;
+        };
+        LoginMfaRequest: {
+            mfa_token: string;
+            /** @description Six-digit TOTP code (required unless recovery_code is set). */
+            totp_code?: string;
+            /**
+             * @description Base32 TOTP secret (client-unwrapped from protected_totp_secret).
+             *     Sent over TLS for server verification; never stored in plaintext.
+             */
+            totp_secret?: string;
+            /** @description Single-use recovery code (alternative to totp_code). */
+            recovery_code?: string;
+        };
+        Enroll2faRequest: {
+            /** @description Vault-key-wrapped TOTP secret (stored at rest). */
+            protected_totp_secret: string;
+            /** @description Plaintext secret for server-side enrollment validation only. */
+            totp_secret: string;
+            /** @description First TOTP code to confirm setup. */
+            totp_code: string;
+        };
+        Enroll2faResponse: {
+            recovery_codes: string[];
+        };
+        Disable2faRequest: {
+            totp_code?: string;
+            totp_secret?: string;
+            recovery_code?: string;
+        };
+        RegenerateRecoveryCodesRequest: {
+            totp_code: string;
+            totp_secret: string;
+        };
+        RecoveryCodesResponse: {
+            recovery_codes: string[];
+        };
+        ActivityEvent: {
+            /** Format: uuid */
+            id: string;
+            event_type: string;
+            ip?: string;
+            user_agent?: string;
+            /** Format: uuid */
+            resource_id?: string;
+            metadata?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            created_at: string;
+        };
+        ActivityResponse: {
+            events: components["schemas"]["ActivityEvent"][];
+            /**
+             * Format: uuid
+             * @description Present when more events exist.
+             */
+            next_cursor?: string;
         };
         LoginKdfParamsResponse: {
             kdf_params: components["schemas"]["KDFParams"];
@@ -549,6 +722,33 @@ export interface operations {
             429: components["responses"]["TooManyRequests"];
         };
     };
+    postLoginMfa: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LoginMfaRequest"];
+            };
+        };
+        responses: {
+            /** @description MFA verified. Session cookie set. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+        };
+    };
     postLogout: {
         parameters: {
             query?: never;
@@ -608,6 +808,107 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    postUser2faEnroll: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Enroll2faRequest"];
+            };
+        };
+        responses: {
+            /** @description 2FA enabled. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Enroll2faResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    deleteUser2fa: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Disable2faRequest"];
+            };
+        };
+        responses: {
+            /** @description 2FA disabled. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    postUser2faRecoveryCodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegenerateRecoveryCodesRequest"];
+            };
+        };
+        responses: {
+            /** @description New recovery codes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryCodesResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getActivity: {
+        parameters: {
+            query?: {
+                limit?: number;
+                /** @description Opaque pagination cursor (event id). */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Activity events. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActivityResponse"];
+                };
+            };
             401: components["responses"]["Unauthorized"];
         };
     };

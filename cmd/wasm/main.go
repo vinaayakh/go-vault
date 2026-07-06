@@ -18,6 +18,7 @@ import (
 	"syscall/js"
 
 	vc "github.com/vinaayakh/secure-vault/internal/crypto"
+	"github.com/vinaayakh/secure-vault/internal/mfa"
 )
 
 func main() {
@@ -31,6 +32,9 @@ func main() {
 	g.Set("vcSealItem", js.FuncOf(jsSealItem))
 	g.Set("vcOpenItem", js.FuncOf(jsOpenItem))
 	g.Set("vcGeneratePassword", js.FuncOf(jsGeneratePassword))
+	g.Set("vcGenerateTOTPSecret", js.FuncOf(jsGenerateTOTPSecret))
+	g.Set("vcWrapTOTPSecret", js.FuncOf(jsWrapTOTPSecret))
+	g.Set("vcUnwrapTOTPSecret", js.FuncOf(jsUnwrapTOTPSecret))
 	select {} // block so the module stays alive
 }
 
@@ -170,7 +174,7 @@ func jsOpenItem(_ js.Value, args []js.Value) any {
 		panic(err.Error())
 	}
 
-	j, err := json.Marshal(item)
+	j, err := json.Marshal(item) //nolint:gosec // G117: decrypted item JSON returned only to the in-browser vault client
 	if err != nil {
 		panic(err.Error())
 	}
@@ -228,4 +232,41 @@ func jsGeneratePassword(_ js.Value, args []js.Value) any {
 		}
 	}
 	return string(result)
+}
+
+// jsGenerateTOTPSecret(email: string) → { secret, url }
+func jsGenerateTOTPSecret(_ js.Value, args []js.Value) any {
+	email := args[0].String()
+	secret, url, err := mfa.GenerateTOTPSecret("Secure Vault", email)
+	if err != nil {
+		panic(err.Error())
+	}
+	obj := js.Global().Get("Object").New()
+	obj.Set("secret", secret)
+	obj.Set("url", url)
+	return obj
+}
+
+// jsWrapTOTPSecret(secret: string, vaultKeyB64: string) → string
+func jsWrapTOTPSecret(_ js.Value, args []js.Value) any {
+	secret := args[0].String()
+	vaultKey := decodeB64(args[1].String())
+	wrapped, err := vc.WrapTOTPSecret(vaultKey, secret)
+	vc.Zero(vaultKey)
+	if err != nil {
+		panic(err.Error())
+	}
+	return base64.StdEncoding.EncodeToString(wrapped)
+}
+
+// jsUnwrapTOTPSecret(wrappedB64: string, vaultKeyB64: string) → string
+func jsUnwrapTOTPSecret(_ js.Value, args []js.Value) any {
+	wrapped := decodeB64(args[0].String())
+	vaultKey := decodeB64(args[1].String())
+	secret, err := vc.UnwrapTOTPSecret(vaultKey, wrapped)
+	vc.Zero(vaultKey)
+	if err != nil {
+		panic(err.Error())
+	}
+	return secret
 }

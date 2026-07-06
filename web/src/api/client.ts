@@ -10,12 +10,20 @@ export type UpdateItem = components["schemas"]["UpdateItem"];
 export type RegisterRequest = components["schemas"]["RegisterRequest"];
 export type LoginRequest = components["schemas"]["LoginRequest"];
 export type LoginResponse = components["schemas"]["LoginResponse"];
+export type LoginMfaRequest = components["schemas"]["LoginMfaRequest"];
 export type LoginKdfParamsResponse = components["schemas"]["LoginKdfParamsResponse"];
 export type SyncResponse = components["schemas"]["SyncResponse"];
 export type UpdateKeyRequest = components["schemas"]["UpdateKeyRequest"];
+export type Enroll2faRequest = components["schemas"]["Enroll2faRequest"];
+export type Enroll2faResponse = components["schemas"]["Enroll2faResponse"];
+export type Disable2faRequest = components["schemas"]["Disable2faRequest"];
+export type RecoveryCodesResponse = components["schemas"]["RecoveryCodesResponse"];
+export type RegenerateRecoveryCodesRequest = components["schemas"]["RegenerateRecoveryCodesRequest"];
+export type ActivityResponse = components["schemas"]["ActivityResponse"];
+export type ActivityEvent = components["schemas"]["ActivityEvent"];
 
 async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(path, { headers: { Accept: "application/json" } });
+  const res = await fetch(path, { credentials: "include", headers: { Accept: "application/json" } });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error((body as { error?: string }).error ?? res.statusText);
@@ -26,6 +34,7 @@ async function getJSON<T>(path: string): Promise<T> {
 async function postJSON<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
     method: "POST",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
@@ -46,6 +55,7 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
 async function putJSON<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
     method: "PUT",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
@@ -63,10 +73,15 @@ async function putJSON<T>(path: string, body: unknown): Promise<T> {
   return (await res.json()) as T;
 }
 
-async function deleteReq(path: string): Promise<void> {
+async function deleteJSON(path: string, body?: unknown): Promise<void> {
   const res = await fetch(path, {
     method: "DELETE",
-    headers: { "X-Vault-CSRF": "1" },
+    credentials: "include",
+    headers: {
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      "X-Vault-CSRF": "1",
+    },
+    body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({ error: res.statusText }));
@@ -81,6 +96,8 @@ export const api = {
 
   login: (req: LoginRequest) => postJSON<LoginResponse>("/api/login", req),
 
+  loginMfa: (req: LoginMfaRequest) => postJSON<LoginResponse>("/api/login/mfa", req),
+
   getLoginKdfParams: (email: string) =>
     getJSON<LoginKdfParamsResponse>(`/api/login/kdf-params?email=${encodeURIComponent(email)}`),
 
@@ -93,9 +110,22 @@ export const api = {
   updateItem: (id: string, req: UpdateItem) =>
     putJSON<Item>(`/api/items/${id}`, req),
 
-  deleteItem: (id: string) => deleteReq(`/api/items/${id}`),
+  deleteItem: (id: string) => deleteJSON(`/api/items/${id}`),
 
-  deleteUser: () => deleteReq("/api/user"),
+  deleteUser: () => deleteJSON("/api/user"),
 
   updateKey: (req: UpdateKeyRequest) => putJSON<void>("/api/user/key", req),
+
+  enroll2fa: (req: Enroll2faRequest) => postJSON<Enroll2faResponse>("/api/user/2fa/enroll", req),
+
+  disable2fa: (req: Disable2faRequest) => deleteJSON("/api/user/2fa", req),
+
+  regenerateRecoveryCodes: (req: RegenerateRecoveryCodesRequest) =>
+    postJSON<RecoveryCodesResponse>("/api/user/2fa/recovery-codes", req),
+
+  activity: (limit = 50, cursor?: string) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set("cursor", cursor);
+    return getJSON<ActivityResponse>(`/api/activity?${params}`);
+  },
 };

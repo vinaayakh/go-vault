@@ -22,9 +22,8 @@ type ctxKey string
 
 const (
 	requestIDKey ctxKey = "request_id"
-	// userIDKey carries the acting user's UUID injected by sessionAuth.
-	// Handlers retrieve it via userIDFromCtx.
-	userIDKey ctxKey = "user_id"
+	userIDKey    ctxKey = "user_id"
+	userAgentKey ctxKey = "user_agent"
 )
 
 // Middleware is the standard net/http decorator shape.
@@ -36,6 +35,21 @@ func chain(h http.Handler, mws ...Middleware) http.Handler {
 		h = mws[i](h)
 	}
 	return h
+}
+
+// captureUserAgent stores the User-Agent header in the request context for audit.
+func captureUserAgent() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := context.WithValue(r.Context(), userAgentKey, r.UserAgent())
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+func userAgentFromCtx(ctx context.Context) string {
+	ua, _ := ctx.Value(userAgentKey).(string)
+	return ua
 }
 
 // requestID attaches a random correlation ID to each request, exposed via the
@@ -162,7 +176,7 @@ func securityHeaders() Middleware {
 			// modules fetched from the same origin (Phase 4 crypto.wasm).
 			h.Set("Content-Security-Policy",
 				"default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; "+
-					"connect-src 'self'; img-src 'self' data:; form-action 'self'; "+
+					"connect-src 'self' https://api.pwnedpasswords.com; img-src 'self' data:; form-action 'self'; "+
 					"frame-ancestors 'none'; base-uri 'self'")
 			h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 			next.ServeHTTP(w, r)

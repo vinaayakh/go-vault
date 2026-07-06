@@ -200,7 +200,7 @@ func TestRegisterLogin(t *testing.T) {
 	if err := json.NewDecoder(loginResp.Body).Decode(&loginBody); err != nil {
 		t.Fatalf("decode login response: %v", err)
 	}
-	if loginBody.ProtectedSymmetricKey != creds.ProtectedSymmetricKey {
+	if loginBody.ProtectedSymmetricKey == nil || *loginBody.ProtectedSymmetricKey != creds.ProtectedSymmetricKey {
 		t.Error("login response: protected_symmetric_key mismatch")
 	}
 
@@ -347,5 +347,54 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 	if csp := resp.Header.Get("Content-Security-Policy"); csp == "" {
 		t.Error("Content-Security-Policy header missing")
+	}
+}
+
+// TestPutUserKey verifies master-password rotation updates credentials.
+func TestPutUserKey(t *testing.T) {
+	srv, _ := testServer(t)
+	client := &http.Client{}
+	email := uniqueEmail()
+	oldPass := "correct-horse-battery-staple"
+	newPass := "new-horse-battery-staple!"
+	creds := deriveClientCreds(t, email, oldPass)
+
+	doJSON(t, client, srv.URL, http.MethodPost, "/api/register",
+		map[string]any{
+			"email": creds.Email, "kdf_params": creds.KDFParams,
+			"auth_hash": creds.AuthHash, "protected_symmetric_key": creds.ProtectedSymmetricKey,
+		}, nil).Body.Close()
+
+	loginResp := doJSON(t, client, srv.URL, http.MethodPost, "/api/login",
+		map[string]any{"email": creds.Email, "auth_hash": creds.AuthHash}, nil)
+	cookie := sessionCookie(loginResp)
+	loginResp.Body.Close()
+
+	newCreds := deriveClientCreds(t, email, newPass)
+	keyResp := doJSON(t, client, srv.URL, http.MethodPut, "/api/user/key",
+		map[string]any{
+			"auth_hash":               newCreds.AuthHash,
+			"kdf_params":              newCreds.KDFParams,
+			"protected_symmetric_key": newCreds.ProtectedSymmetricKey,
+		}, cookie)
+	keyResp.Body.Close()
+	if keyResp.StatusCode != http.StatusOK {
+		t.Fatalf("put user key: got %d, want 200", keyResp.StatusCode)
+	}
+
+	// Old password must fail.
+	bad := doJSON(t, client, srv.URL, http.MethodPost, "/api/login",
+		map[string]any{"email": email, "auth_hash": creds.AuthHash}, nil)
+	bad.Body.Close()
+	if bad.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old password after rotation: got %d, want 401", bad.StatusCode)
+	}
+
+	// New password must succeed.
+	good := doJSON(t, client, srv.URL, http.MethodPost, "/api/login",
+		map[string]any{"email": email, "auth_hash": newCreds.AuthHash}, nil)
+	good.Body.Close()
+	if good.StatusCode != http.StatusOK {
+		t.Fatalf("new password after rotation: got %d, want 200", good.StatusCode)
 	}
 }

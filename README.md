@@ -152,3 +152,27 @@ The E2E suite intercepts all outbound network requests and asserts that no POST/
 go build ./... && go vet ./...
 curl http://localhost:8080/api/health   # {"status":"ok"}
 ```
+
+## Phase 5 features
+
+| Feature | Location |
+|---------|----------|
+| TOTP 2FA + recovery codes | Settings → Security |
+| Audit log / recent activity | Settings → Activity |
+| Master password change | Settings → Security |
+| Encrypted vault export/import | Settings → Data; [EXPORT_FORMAT.md](docs/EXPORT_FORMAT.md) |
+| HIBP breach check | Registration + password fields (client-side) |
+| Account recovery policy | [docs/RECOVERY.md](docs/RECOVERY.md) |
+
+## Verify release image (cosign)
+
+After a tagged release (`v*`), verify the container signature:
+
+```sh
+cosign verify ghcr.io/<owner>/secure-vault:<tag> \
+  --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp='https://github.com/<owner>/secure-vault/.github/workflows/release.yml@.*'
+```
+
+Inspect SLSA provenance via the GitHub release assets (`sbom.spdx.json`) and OCI attestations
+attached by the [release workflow](.github/workflows/release.yml).

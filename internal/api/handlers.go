@@ -8,29 +8,42 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 
 	"github.com/vinaayakh/secure-vault/internal/api/gen"
+	"github.com/vinaayakh/secure-vault/internal/audit"
 	"github.com/vinaayakh/secure-vault/internal/auth"
 	"github.com/vinaayakh/secure-vault/internal/crypto"
 	"github.com/vinaayakh/secure-vault/internal/storage"
 )
 
 const sessionMaxAge = 86400 // 24 hours in seconds
+const mfaChallengeTTL = 5 * time.Minute
 
 // Server implements gen.ServerInterface — the set of handlers generated from
 // api/openapi.yaml.
 type Server struct {
-	log   *slog.Logger
-	store *storage.Store
-	auth  *auth.Manager
+	log      *slog.Logger
+	store    *storage.Store
+	auth     *auth.Manager
+	notifier audit.Notifier
+	alerts   *audit.Tracker
 }
 
 // NewServer constructs the API handler set.
 func NewServer(log *slog.Logger, store *storage.Store, authMgr *auth.Manager) *Server {
-	return &Server{log: log, store: store, auth: authMgr}
+	notifier := &audit.SlogNotifier{Log: log}
+	return &Server{
+		log:      log,
+		store:    store,
+		auth:     authMgr,
+		notifier: notifier,
+		alerts:   audit.NewTracker(notifier),
+	}
 }
 
 // Ensure *Server satisfies the generated contract at compile time.
@@ -107,6 +120,8 @@ func (s *Server) PostRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
+	// Registration audit without user id (enumeration-safe).
+	s.recordEvent(r, nil, EventRegister, nil, map[string]any{"outcome": "created"})
 }
 
 // GetLoginKdfParams implements GET /api/login/kdf-params.
@@ -211,45 +226,52 @@ func (s *Server) PostLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if subtle.ConstantTimeCompare(candidate, user.AuthHash) != 1 {
+		uid := user.ID
+		s.recordEvent(r, &uid, EventLoginFailure, nil, map[string]any{"reason": "invalid_credentials"})
 		writeJSON(w, http.StatusUnauthorized, gen.Error{Error: "invalid credentials"})
 		return
 	}
 
-	// Auth succeeded — clear rate-limit counters and create session.
+	// Auth succeeded — clear rate-limit counters.
 	s.auth.ResetLoginLimit(ip, email)
 
-	rawToken, err := s.auth.CreateSession(r.Context(), user.ID)
-	if err != nil {
-		s.logInternalError(r, "login: create session", err)
-		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+	if user.TOTPEnabled {
+		token, err := s.createMFAToken(r.Context(), user.ID)
+		if err != nil {
+			s.logInternalError(r, "login: mfa challenge", err)
+			writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+			return
+		}
+		uid := user.ID
+		s.recordEvent(r, &uid, EventMFARequired, nil, nil)
+		mfaRequired := true
+		ptotp := ""
+		if user.ProtectedTOTPSecret != nil {
+			ptotp = *user.ProtectedTOTPSecret
+		}
+		var kdfParams gen.KDFParams
+		if err := json.Unmarshal(user.KDFParams, &kdfParams); err != nil {
+			s.logInternalError(r, "login: unmarshal kdf_params", err)
+			writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+			return
+		}
+		psk := user.ProtectedSymmetricKey
+		writeJSON(w, http.StatusOK, gen.LoginResponse{
+			MfaRequired:           &mfaRequired,
+			MfaToken:              &token,
+			ProtectedTotpSecret:   &ptotp,
+			ProtectedSymmetricKey: &psk,
+			KdfParams:             &kdfParams,
+		})
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     auth.CookieName,
-		Value:    rawToken,
-		Path:     "/",
-		MaxAge:   sessionMaxAge,
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-	})
-
-	var kdfParams gen.KDFParams
-	if err := json.Unmarshal(user.KDFParams, &kdfParams); err != nil {
-		s.logInternalError(r, "login: unmarshal kdf_params", err)
-		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, gen.LoginResponse{
-		ProtectedSymmetricKey: user.ProtectedSymmetricKey,
-		KdfParams:             kdfParams,
-	})
+	s.completeLogin(w, r, user)
 }
 
 // PostLogout implements POST /api/logout.
 func (s *Server) PostLogout(w http.ResponseWriter, r *http.Request) {
+	userID, _ := userIDFromCtx(r.Context())
 	cookie, err := r.Cookie(auth.CookieName)
 	if err == nil {
 		if rErr := s.auth.RevokeSession(r.Context(), cookie.Value); rErr != nil {
@@ -267,6 +289,9 @@ func (s *Server) PostLogout(w http.ResponseWriter, r *http.Request) {
 		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
+	if userID != uuid.Nil {
+		s.recordEvent(r, &userID, EventLogout, nil, nil)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -297,6 +322,7 @@ func (s *Server) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
+	s.recordEvent(r, &userID, EventUserDelete, nil, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -351,6 +377,7 @@ func (s *Server) PutUserKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.recordEvent(r, &userID, EventKeyRotation, nil, nil)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -434,6 +461,8 @@ func (s *Server) CreateItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "failed to create item"})
 		return
 	}
+	rid := item.ID
+	s.recordEvent(r, &userID, EventItemCreate, &rid, map[string]any{"item_type": body.ItemType})
 	writeJSON(w, http.StatusCreated, storageItemToGen(item))
 }
 
@@ -483,6 +512,8 @@ func (s *Server) UpdateItem(w http.ResponseWriter, r *http.Request, id openapi_t
 		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "failed to update item"})
 		return
 	}
+	rid := item.ID
+	s.recordEvent(r, &userID, EventItemUpdate, &rid, map[string]any{"revision": item.Revision})
 	writeJSON(w, http.StatusOK, storageItemToGen(item))
 }
 
@@ -504,6 +535,7 @@ func (s *Server) DeleteItem(w http.ResponseWriter, r *http.Request, id openapi_t
 		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "failed to delete item"})
 		return
 	}
+	s.recordEvent(r, &userID, EventItemDelete, &id, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -549,6 +581,8 @@ func (s *Server) GetSync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, gen.SyncResponse{
 		ProtectedSymmetricKey: user.ProtectedSymmetricKey,
 		KdfParams:             kdfParams,
+		TotpEnabled:           user.TOTPEnabled,
+		ProtectedTotpSecret:   user.ProtectedTOTPSecret,
 		Items:                 genItems,
 	})
 }

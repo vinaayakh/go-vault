@@ -46,6 +46,9 @@ declare function vcGeneratePassword(
   digits: boolean,
   symbols: boolean
 ): string;
+declare function vcGenerateTOTPSecret(email: string): { secret: string; url: string };
+declare function vcWrapTOTPSecret(secret: string, vaultKeyB64: string): string;
+declare function vcUnwrapTOTPSecret(wrappedB64: string, vaultKeyB64: string): string;
 
 export interface CryptoService {
   deriveMasterKey(password: string, email: string, kdfParams: KDFParams): string;
@@ -57,6 +60,9 @@ export interface CryptoService {
   sealItem(item: PlainItem, vaultKeyB64: string): string;
   openItem(ciphertextB64: string, vaultKeyB64: string): PlainItem;
   generatePassword(length: number, uppercase: boolean, lowercase: boolean, digits: boolean, symbols: boolean): string;
+  generateTOTPSecret(email: string): { secret: string; url: string };
+  wrapTOTPSecret(secret: string, vaultKeyB64: string): string;
+  unwrapTOTPSecret(wrappedB64: string, vaultKeyB64: string): string;
 }
 
 // Default Argon2id parameters matching server-side DefaultKDFParams().
@@ -146,6 +152,12 @@ async function loadCrypto(): Promise<CryptoService> {
 
     generatePassword: (length, uppercase, lowercase, digits, symbols) =>
       vcGeneratePassword(length, uppercase, lowercase, digits, symbols),
+
+    generateTOTPSecret: (email) => vcGenerateTOTPSecret(email),
+
+    wrapTOTPSecret: (secret, vaultKeyB64) => vcWrapTOTPSecret(secret, vaultKeyB64),
+
+    unwrapTOTPSecret: (wrappedB64, vaultKeyB64) => vcUnwrapTOTPSecret(wrappedB64, vaultKeyB64),
   };
 
   return service;

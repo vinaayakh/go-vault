@@ -260,6 +260,81 @@ jobs:
         working-directory: web
         run: npm run test:e2e
 
+  zap-baseline:
+    name: OWASP ZAP baseline
+    runs-on: ubuntu-latest
+    needs: [build-test]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vault_root
+          POSTGRES_PASSWORD: cipassword
+          POSTGRES_DB: vault_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vault_root -d vault_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://vault_root:cipassword@localhost:5432/vault_test?sslmode=disable
+      DATABASE_SUPERUSER_URL: postgres://vault_root:cipassword@localhost:5432/vault_test?sslmode=disable
+      ALLOWED_ORIGIN: http://localhost:5173
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install golang-migrate CLI
+        run: |
+          curl -sSfL https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin migrate
+      - name: Run migrations
+        run: migrate -path migrations -database "$DATABASE_SUPERUSER_URL" up
+      - name: Build WASM and stack
+        run: |
+          make wasm
+          go build -o /tmp/secure-vault-server ./cmd/server
+          /tmp/secure-vault-server &
+          cd web && npm ci && npm run build
+          npx vite preview --port 5173 --host 127.0.0.1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:5173/ && curl -sf http://localhost:8080/api/health && exit 0
+            sleep 1
+          done
+          exit 1
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@87a93547a78a579ecfca60b043e0091ed4b43575 # v0.14.0
+        with:
+          target: http://127.0.0.1:5173
+          rules_file_name: .zap/rules.tsv
+          cmd_options: -a -I
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: zap-report
+          path: report_html.html
+
+  fuzz:
+    name: fuzz (crypto + API)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -fuzz=FuzzOpen -fuzztime=60s ./internal/crypto/...
+      - run: go test -fuzz=FuzzDecodeJSON -fuzztime=60s ./internal/api/...
+
   docker-scan:
     name: Trivy (image scan)
     runs-on: ubuntu-latest

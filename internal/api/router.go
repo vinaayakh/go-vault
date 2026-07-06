@@ -43,6 +43,10 @@ func NewRouter(log *slog.Logger, store *storage.Store, authMgr *auth.Manager, cf
 		http.HandlerFunc(srv.PostLogin),
 		requireCSRF(),
 	).ServeHTTP)
+	mux.HandleFunc("POST /api/login/mfa", chain(
+		http.HandlerFunc(srv.PostLoginMfa),
+		requireCSRF(),
+	).ServeHTTP)
 
 	// --- Session-guarded routes ---
 	// Logout: guarded, state-changing.
@@ -62,6 +66,25 @@ func NewRouter(log *slog.Logger, store *storage.Store, authMgr *auth.Manager, cf
 		http.HandlerFunc(srv.PutUserKey),
 		sessionAuth(authMgr),
 		requireCSRF(),
+	).ServeHTTP)
+	mux.HandleFunc("POST /api/user/2fa/enroll", chain(
+		http.HandlerFunc(srv.PostUser2faEnroll),
+		sessionAuth(authMgr),
+		requireCSRF(),
+	).ServeHTTP)
+	mux.HandleFunc("DELETE /api/user/2fa", chain(
+		http.HandlerFunc(srv.DeleteUser2fa),
+		sessionAuth(authMgr),
+		requireCSRF(),
+	).ServeHTTP)
+	mux.HandleFunc("POST /api/user/2fa/recovery-codes", chain(
+		http.HandlerFunc(srv.PostUser2faRecoveryCodes),
+		sessionAuth(authMgr),
+		requireCSRF(),
+	).ServeHTTP)
+	mux.HandleFunc("GET /api/activity", chain(
+		http.HandlerFunc(srv.getActivity),
+		sessionAuth(authMgr),
 	).ServeHTTP)
 
 	// Item CRUD: guarded. GET is read-only (no CSRF needed); POST/PUT/DELETE are state-changing.
@@ -94,6 +117,7 @@ func NewRouter(log *slog.Logger, store *storage.Store, authMgr *auth.Manager, cf
 	// Global middleware — outermost first (applied to everything).
 	return chain(mux,
 		requestID(),
+		captureUserAgent(),
 		recoverPanic(log),
 		logRequests(log),
 		limitBody(),

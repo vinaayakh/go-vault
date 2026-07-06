@@ -22,6 +22,8 @@ type User struct {
 	AuthHash              []byte
 	AuthHashSalt          []byte
 	ProtectedSymmetricKey string
+	TOTPEnabled           bool
+	ProtectedTOTPSecret   *string
 	CreatedAt             time.Time
 }
 
@@ -32,7 +34,8 @@ type UsersRepo struct {
 }
 
 const getUserByIDSQL = `
-SELECT id, email, kdf_params, auth_hash, auth_hash_salt, protected_symmetric_key, created_at
+SELECT id, email, kdf_params, auth_hash, auth_hash_salt, protected_symmetric_key,
+       totp_enabled, protected_totp_secret, created_at
 FROM users
 WHERE id = $1
 LIMIT 1`
@@ -42,7 +45,7 @@ func (r *UsersRepo) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
 	u := &User{}
 	err := r.pool.QueryRow(ctx, getUserByIDSQL, id).Scan(
 		&u.ID, &u.Email, &u.KDFParams, &u.AuthHash, &u.AuthHashSalt,
-		&u.ProtectedSymmetricKey, &u.CreatedAt,
+		&u.ProtectedSymmetricKey, &u.TOTPEnabled, &u.ProtectedTOTPSecret, &u.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -54,7 +57,8 @@ func (r *UsersRepo) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
 }
 
 const getUserByEmailSQL = `
-SELECT id, email, kdf_params, auth_hash, auth_hash_salt, protected_symmetric_key, created_at
+SELECT id, email, kdf_params, auth_hash, auth_hash_salt, protected_symmetric_key,
+       totp_enabled, protected_totp_secret, created_at
 FROM users
 WHERE email = $1
 LIMIT 1`
@@ -65,7 +69,7 @@ func (r *UsersRepo) GetByEmail(ctx context.Context, email string) (*User, error)
 	u := &User{}
 	err := r.pool.QueryRow(ctx, getUserByEmailSQL, email).Scan(
 		&u.ID, &u.Email, &u.KDFParams, &u.AuthHash, &u.AuthHashSalt,
-		&u.ProtectedSymmetricKey, &u.CreatedAt,
+		&u.ProtectedSymmetricKey, &u.TOTPEnabled, &u.ProtectedTOTPSecret, &u.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -79,7 +83,8 @@ func (r *UsersRepo) GetByEmail(ctx context.Context, email string) (*User, error)
 const createUserSQL = `
 INSERT INTO users (email, kdf_params, auth_hash, auth_hash_salt, protected_symmetric_key)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, email, kdf_params, auth_hash, auth_hash_salt, protected_symmetric_key, created_at`
+RETURNING id, email, kdf_params, auth_hash, auth_hash_salt, protected_symmetric_key,
+          totp_enabled, protected_totp_secret, created_at`
 
 // Create inserts a new user row and returns the persisted record.
 // email should be normalized via crypto.NormalizeEmail before calling.
@@ -95,7 +100,7 @@ func (r *UsersRepo) Create(
 		email, kdfParams, authHash, authHashSalt, protectedSymmetricKey,
 	).Scan(
 		&u.ID, &u.Email, &u.KDFParams, &u.AuthHash, &u.AuthHashSalt,
-		&u.ProtectedSymmetricKey, &u.CreatedAt,
+		&u.ProtectedSymmetricKey, &u.TOTPEnabled, &u.ProtectedTOTPSecret, &u.CreatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
@@ -107,7 +112,8 @@ const updateProtectedKeySQL = `
 UPDATE users
 SET protected_symmetric_key = $2
 WHERE id = $1
-RETURNING id, email, kdf_params, auth_hash, auth_hash_salt, protected_symmetric_key, created_at`
+RETURNING id, email, kdf_params, auth_hash, auth_hash_salt, protected_symmetric_key,
+          totp_enabled, protected_totp_secret, created_at`
 
 // UpdateProtectedKey replaces the wrapped vault key (e.g. after a master-password
 // change in Phase 3+). Returns ErrNotFound when the user id does not exist.
@@ -115,7 +121,7 @@ func (r *UsersRepo) UpdateProtectedKey(ctx context.Context, id uuid.UUID, newKey
 	u := &User{}
 	err := r.pool.QueryRow(ctx, updateProtectedKeySQL, id, newKey).Scan(
 		&u.ID, &u.Email, &u.KDFParams, &u.AuthHash, &u.AuthHashSalt,
-		&u.ProtectedSymmetricKey, &u.CreatedAt,
+		&u.ProtectedSymmetricKey, &u.TOTPEnabled, &u.ProtectedTOTPSecret, &u.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -134,7 +140,8 @@ SET auth_hash               = $2,
     kdf_params              = $4,
     protected_symmetric_key = $5
 WHERE id = $1
-RETURNING id, email, kdf_params, auth_hash, auth_hash_salt, protected_symmetric_key, created_at`
+RETURNING id, email, kdf_params, auth_hash, auth_hash_salt, protected_symmetric_key,
+          totp_enabled, protected_totp_secret, created_at`
 
 // UpdateAuthCredentials atomically replaces auth material for a master-password
 // rotation: new server-side auth hash, its salt, the updated KDF params, and the
@@ -151,7 +158,7 @@ func (r *UsersRepo) UpdateAuthCredentials(
 		id, newAuthHash, newAuthHashSalt, newKDFParams, newProtectedKey,
 	).Scan(
 		&u.ID, &u.Email, &u.KDFParams, &u.AuthHash, &u.AuthHashSalt,
-		&u.ProtectedSymmetricKey, &u.CreatedAt,
+		&u.ProtectedSymmetricKey, &u.TOTPEnabled, &u.ProtectedTOTPSecret, &u.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound

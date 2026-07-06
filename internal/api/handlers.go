@@ -21,7 +21,6 @@ import (
 	"github.com/vinaayakh/secure-vault/internal/storage"
 )
 
-const sessionMaxAge = 86400 // 24 hours in seconds
 const mfaChallengeTTL = 5 * time.Minute
 
 // Server implements gen.ServerInterface — the set of handlers generated from
@@ -193,7 +192,7 @@ func (s *Server) PostLogin(w http.ResponseWriter, r *http.Request) {
 
 	email := crypto.NormalizeEmail(string(body.Email))
 
-	if !s.auth.CheckLoginLimit(ip, email) {
+	if s.auth.IsLoginLocked(email) || !s.auth.CheckLoginLimit(ip, email) {
 		writeJSON(w, http.StatusTooManyRequests, gen.Error{Error: "too many login attempts; try again later"})
 		return
 	}
@@ -209,6 +208,9 @@ func (s *Server) PostLogin(w http.ResponseWriter, r *http.Request) {
 		// Perform a dummy hash to equalize timing for unknown vs wrong-password.
 		dummySalt, _ := crypto.NewServerSalt()
 		_, _ = crypto.DeriveServerAuthHash(clientAuthHash, dummySalt, crypto.DefaultServerAuthParams())
+		if d := s.auth.RecordLoginFailure(email); d > 0 {
+			time.Sleep(d)
+		}
 		writeJSON(w, http.StatusUnauthorized, gen.Error{Error: "invalid credentials"})
 		return
 	}
@@ -228,6 +230,9 @@ func (s *Server) PostLogin(w http.ResponseWriter, r *http.Request) {
 	if subtle.ConstantTimeCompare(candidate, user.AuthHash) != 1 {
 		uid := user.ID
 		s.recordEvent(r, &uid, EventLoginFailure, nil, map[string]any{"reason": "invalid_credentials"})
+		if d := s.auth.RecordLoginFailure(email); d > 0 {
+			time.Sleep(d)
+		}
 		writeJSON(w, http.StatusUnauthorized, gen.Error{Error: "invalid credentials"})
 		return
 	}
@@ -269,26 +274,41 @@ func (s *Server) PostLogin(w http.ResponseWriter, r *http.Request) {
 	s.completeLogin(w, r, user)
 }
 
+// PostAuthRefresh implements POST /api/auth/refresh.
+func (s *Server) PostAuthRefresh(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie(auth.RefreshCookieName)
+	if err != nil || cookie.Value == "" {
+		writeJSON(w, http.StatusUnauthorized, gen.Error{Error: "authentication required"})
+		return
+	}
+
+	newAccess, newRefresh, err := s.auth.RefreshSession(r.Context(), cookie.Value)
+	if errors.Is(err, auth.ErrSessionInvalid) {
+		clearAuthCookies(w)
+		writeJSON(w, http.StatusUnauthorized, gen.Error{Error: "authentication required"})
+		return
+	}
+	if err != nil {
+		s.logInternalError(r, "auth refresh", err)
+		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
+		return
+	}
+
+	setAuthCookies(w, newAccess, newRefresh, s.auth.AccessTTL(), s.auth.RefreshTTL())
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // PostLogout implements POST /api/logout.
 func (s *Server) PostLogout(w http.ResponseWriter, r *http.Request) {
 	userID, _ := userIDFromCtx(r.Context())
-	cookie, err := r.Cookie(auth.CookieName)
+	cookie, err := r.Cookie(auth.AccessCookieName)
 	if err == nil {
 		if rErr := s.auth.RevokeSession(r.Context(), cookie.Value); rErr != nil {
 			s.logInternalError(r, "logout: revoke session", rErr)
 		}
 	}
 
-	// Clear cookie unconditionally.
-	http.SetCookie(w, &http.Cookie{
-		Name:     auth.CookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-	})
+	clearAuthCookies(w)
 	if userID != uuid.Nil {
 		s.recordEvent(r, &userID, EventLogout, nil, nil)
 	}
@@ -313,15 +333,7 @@ func (s *Server) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     auth.CookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-	})
+	clearAuthCookies(w)
 	s.recordEvent(r, &userID, EventUserDelete, nil, nil)
 	w.WriteHeader(http.StatusNoContent)
 }

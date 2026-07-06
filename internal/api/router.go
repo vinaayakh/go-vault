@@ -47,6 +47,10 @@ func NewRouter(log *slog.Logger, store *storage.Store, authMgr *auth.Manager, cf
 		http.HandlerFunc(srv.PostLoginMfa),
 		requireCSRF(),
 	).ServeHTTP)
+	mux.HandleFunc("POST /api/auth/refresh", chain(
+		http.HandlerFunc(srv.PostAuthRefresh),
+		requireCSRF(),
+	).ServeHTTP)
 
 	// --- Session-guarded routes ---
 	// Logout: guarded, state-changing.

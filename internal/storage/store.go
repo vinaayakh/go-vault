@@ -1,6 +1,5 @@
-// Package storage is the injection-safe persistence layer. All queries use
-// pgx parameterized placeholders ($1, $2, …) — no string concatenation, no
-// fmt.Sprintf into SQL. See plan/phase-2-server-storage.md §2.2.
+// Package storage is the injection-safe persistence layer backed by sqlc-generated
+// queries in sqlcgen/. See docs/THREAT_MODEL.md for design decisions.
 package storage
 
 import (
@@ -8,20 +7,22 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/vinaayakh/secure-vault/internal/storage/sqlcgen"
 )
 
 // ErrNotFound is returned when a record is not found (or not owned by the caller).
 var ErrNotFound = errors.New("record not found")
 
 // ErrConflict is returned when an optimistic-concurrency revision check fails.
-// The client must fetch the latest revision before retrying the update.
 var ErrConflict = errors.New("revision conflict: a newer version exists")
 
 // Store holds the Postgres connection pool and repository implementations.
-// It is safe for concurrent use; the pool manages connections internally.
 type Store struct {
 	pool     *pgxpool.Pool
+	q        *sqlcgen.Queries
 	Users    *UsersRepo
 	Items    *ItemsRepo
 	Sessions *SessionsRepo
@@ -30,7 +31,6 @@ type Store struct {
 }
 
 // New opens a connection pool and pings the database to verify connectivity.
-// Returns an error (not a panic) so the caller can log and exit cleanly.
 func New(ctx context.Context, dsn string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -41,12 +41,13 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
-	s := &Store{pool: pool}
-	s.Users = &UsersRepo{pool: pool}
-	s.Items = &ItemsRepo{pool: pool}
-	s.Sessions = &SessionsRepo{pool: pool}
-	s.Audit = &AuditRepo{pool: pool}
-	s.MFA = &MFARepo{pool: pool}
+	q := sqlcgen.New(pool)
+	s := &Store{pool: pool, q: q}
+	s.Users = &UsersRepo{q: q}
+	s.Items = &ItemsRepo{q: q}
+	s.Sessions = &SessionsRepo{q: q}
+	s.Audit = &AuditRepo{q: q}
+	s.MFA = &MFARepo{q: q, pool: pool}
 	return s, nil
 }
 
@@ -55,7 +56,14 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
 }
 
-// Close releases all connections in the pool. Call on graceful shutdown.
+// Close releases all connections in the pool.
 func (s *Store) Close() {
 	s.pool.Close()
+}
+
+func mapNotFound(err error) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	return err
 }

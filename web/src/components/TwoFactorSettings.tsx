@@ -103,7 +103,7 @@ export function TwoFactorSettings({ email, totpEnabled, protectedTotpSecret, onC
       return (
         <div>
           <p>Scan this URI in your authenticator app:</p>
-          <code style={{ wordBreak: "break-all", fontSize: "0.85rem" }}>{provisioningURL}</code>
+          <code data-testid="totp-provisioning-uri" style={{ wordBreak: "break-all", fontSize: "0.85rem" }}>{provisioningURL}</code>
           <form onSubmit={confirmEnroll} style={{ marginTop: "1rem" }}>
             <label style={{ display: "block" }}>
               Verification code

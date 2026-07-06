@@ -102,14 +102,14 @@ func TestValidateSession_ExpiredDetected(t *testing.T) {
 	// Build a session that is already expired.
 	past := time.Now().Add(-1 * time.Hour)
 	sess := &storage.Session{
-		ID:        uuid.New(),
-		UserID:    uuid.New(),
-		TokenHash: hashToken("tok"),
-		ExpiresAt: past,
+		ID:              uuid.New(),
+		UserID:          uuid.New(),
+		AccessTokenHash: hashToken("tok"),
+		AccessExpiresAt: past,
 	}
 
 	// Verify the expiry check logic directly (the DB call is tested in integration tests).
-	if !time.Now().After(sess.ExpiresAt) {
+	if !time.Now().After(sess.AccessExpiresAt) {
 		t.Fatal("session should be expired")
 	}
 }
@@ -118,12 +118,12 @@ func TestValidateSession_ExpiredDetected(t *testing.T) {
 func TestValidateSession_NotExpired(t *testing.T) {
 	future := time.Now().Add(1 * time.Hour)
 	sess := &storage.Session{
-		ID:        uuid.New(),
-		UserID:    uuid.New(),
-		TokenHash: hashToken("tok"),
-		ExpiresAt: future,
+		ID:              uuid.New(),
+		UserID:          uuid.New(),
+		AccessTokenHash: hashToken("tok"),
+		AccessExpiresAt: future,
 	}
-	if time.Now().After(sess.ExpiresAt) {
+	if time.Now().After(sess.AccessExpiresAt) {
 		t.Fatal("session should not be expired")
 	}
 }

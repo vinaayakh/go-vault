@@ -65,8 +65,8 @@ export interface paths {
          * Authenticate and open a session
          * @description Accepts email + the client-derived auth hash. The server re-hashes the
          *     auth hash server-side and compares with the stored value using
-         *     constant-time equality. On success, sets a `vault_session` session cookie
-         *     (HttpOnly, Secure, SameSite=Strict) and returns the protected symmetric
+         *     constant-time equality. On success, sets `vault_access` and `vault_refresh`
+         *     cookies (HttpOnly, Secure, SameSite=Strict) and returns the protected symmetric
          *     key + KDF params so the client can unlock the vault locally.
          */
         post: operations["postLogin"];
@@ -89,10 +89,32 @@ export interface paths {
          * Complete login with TOTP or recovery code
          * @description Second step after POST /api/login when `mfa_required` is true. Validates
          *     the TOTP code (server-side via the client-supplied secret over TLS) or a
-         *     single-use recovery code. On success, sets the session cookie and returns
+         *     single-use recovery code. On success, sets the access and refresh cookies and returns
          *     the vault unlock material.
          */
         post: operations["postLoginMfa"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate access token using refresh cookie
+         * @description Reads the `vault_refresh` cookie (path `/api/auth/refresh`), validates it,
+         *     rotates both tokens server-side, and returns new `vault_access` and
+         *     `vault_refresh` cookies. Requires the `X-Vault-CSRF: 1` header.
+         */
+        post: operations["postAuthRefresh"];
         delete?: never;
         options?: never;
         head?: never;
@@ -110,8 +132,9 @@ export interface paths {
         put?: never;
         /**
          * Revoke the current session
-         * @description Revokes the session server-side and clears the `vault_session` cookie.
-         *     Requires a valid session cookie and the `X-Vault-CSRF: 1` header.
+         * @description Revokes the session server-side and clears the `vault_access` and
+         *     `vault_refresh` cookies. Requires a valid access cookie and the
+         *     `X-Vault-CSRF: 1` header.
          */
         post: operations["postLogout"];
         delete?: never;
@@ -298,7 +321,7 @@ export interface paths {
         /**
          * List the caller's vault items (ciphertext only)
          * @description Returns every vault item belonging to the authenticated user as opaque
-         *     ciphertext + metadata. Requires a valid `vault_session` cookie (Phase 3).
+         *     ciphertext + metadata. Requires a valid `vault_access` cookie (Phase 3).
          */
         get: operations["listItems"];
         put?: never;
@@ -399,7 +422,7 @@ export interface components {
             /**
              * @description Base64-encoded (standard, padded) AEAD ciphertext of the item.
              *     Opaque to the server. Format: nonce(24 bytes) || ciphertext || tag(16 bytes),
-             *     base64-encoded as a single blob. See plan/phase-1-crypto-core.md §wire-formats.
+             *     base64-encoded as a single blob. See docs/THREAT_MODEL.md §8.
              */
             ciphertext: string;
             /**
@@ -747,6 +770,25 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             429: components["responses"]["TooManyRequests"];
+        };
+    };
+    postAuthRefresh: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tokens rotated. New cookies set. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
         };
     };
     postLogout: {

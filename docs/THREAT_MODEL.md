@@ -215,7 +215,7 @@ For reference, the controls already enforced by the repo:
 ## 8. Cryptographic specification
 
 > **Status: as-built (Phase 1).** The values below match the implementation in
-> `internal/crypto` and the decisions pinned in `plan/phase-1-crypto-core.md`
+> `internal/crypto` and the wire formats documented in §8 below
 > ("Wire formats & parameters"). They are verified by the package test suite, including
 > known-answer tests: Argon2id is pinned by a regression vector, and `Open` is checked against
 > the published XChaCha20-Poly1305 vector from draft-irtf-cfrg-xchacha-03 §A.3.1. Round-trip and
@@ -280,20 +280,29 @@ uses `subtle.ConstantTimeCompare` to verify — preventing timing-based enumerat
 **On unknown email:** a dummy `DeriveServerAuthHash` call runs before returning 401, equalizing
 timing so an observer cannot distinguish "email not found" from "wrong password."
 
-### Session cookie attributes
+### Session cookie attributes (dual-token model)
+
+| Cookie | TTL (default) | Path | Purpose |
+|--------|---------------|------|---------|
+| `vault_access` | 15 min (`ACCESS_TOKEN_DURATION`) | `/` | Authenticates API requests |
+| `vault_refresh` | 7 days (`REFRESH_TOKEN_DURATION`) | `/api/auth/refresh` | Rotates access token via `POST /api/auth/refresh` |
 
 | Attribute | Value | Why |
 |-----------|-------|-----|
-| `HttpOnly` | true | Blocks JS from reading the cookie (XSS defense) |
-| `Secure` | true | Cookie only sent over HTTPS |
+| `HttpOnly` | true | Blocks JS from reading cookies (XSS defense) |
+| `Secure` | true | Cookies only sent over HTTPS |
 | `SameSite` | Strict | Blocks cross-site request forgery (primary CSRF defense) |
-| `Path` | / | Sent on all API paths |
-| `MaxAge` | 86400 (24 h) | Time-bounded sessions; no indefinite-lived tokens |
 
-**Session token storage:** 32-byte `crypto/rand` → hex string in cookie; SHA-256 hash stored
-in DB. A DB leak of the `sessions` table cannot be directly replayed.
-**Server-side revocation:** sessions are stored in the `sessions` table so logout (`DELETE`)
-and account deletion (`DELETE * WHERE user_id`) are immediate — no need to wait for expiry.
+**Token storage:** 32-byte `crypto/rand` → hex string per cookie; SHA-256 hashes stored in DB.
+Refresh tokens rotate on every `POST /api/auth/refresh` (old refresh invalidated).
+**Server-side revocation:** sessions live in the `sessions` table — logout and account deletion
+revoke immediately.
+
+### Account lockout
+
+After **5** failed login attempts for an email within **15 minutes**, the account is locked for
+**15 minutes** (`internal/auth.LockoutTracker`). Failed attempts also incur exponential backoff
+delay before the 401 response (`min(2^n × 250ms, 8s)`).
 
 ### Rate limiting
 
@@ -314,8 +323,8 @@ is acceptable. Phase 5 can replace with Redis-backed counters if needed.
 ### CSRF defenses
 
 Two independent layers:
-1. **SameSite=Strict cookie** — the browser will not attach the `vault_session` cookie to
-   cross-site requests, so any cross-site POST cannot be authenticated.
+1. **SameSite=Strict cookies** — the browser will not attach `vault_access` or `vault_refresh`
+   to cross-site requests, so unauthenticated cross-site POSTs cannot act on the session.
 2. **`X-Vault-CSRF: 1` custom header** — all state-changing routes (`POST`, `PUT`, `DELETE`)
    require this header. Browsers cannot include custom headers in cross-origin requests without
    a CORS preflight; since the preflight checks the `Access-Control-Allow-Origin` against
@@ -424,11 +433,8 @@ could still serve modified JS — see §10 for the accepted residual risk.
 
 ## 12. References
 
-- `plan/README.md` — architecture and the zero-knowledge invariant.
-- `plan/phase-0-foundations.md` — this phase's tasks and DoD.
-- `plan/phase-1-crypto-core.md` — crypto primitives, wire formats, parameters (source for §8).
-- `plan/phase-2-server-storage.md` — DB schema, storage layer, dev-auth guard.
-- `plan/phase-3-auth.md` — auth, sessions, rate limiting, security headers, CSRF.
-- `api/openapi.yaml` — the API contract that encodes the ciphertext-only invariant.
-- `deploy/Dockerfile`, `.github/workflows/ci.yml`, `.pre-commit-config.yaml` — the controls
-  in §7.
+- [docs/THREAT_MODEL.md](THREAT_MODEL.md) §8 — cryptographic specification and wire formats
+- [docs/BACKUP.md](BACKUP.md) — database backup and restore
+- [docs/CONTRIBUTING.md](CONTRIBUTING.md) — PR checklist and GitHub governance
+- `api/openapi.yaml` — the API contract that encodes the ciphertext-only invariant
+- `deploy/Dockerfile`, `deploy/README.md`, `.github/workflows/ci.yml`, `.pre-commit-config.yaml` — the controls in §7

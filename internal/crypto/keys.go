@@ -25,7 +25,7 @@ var ErrEmptyAuthHash = errors.New("auth hash input must not be empty")
 // DefaultServerAuthParams returns the Argon2id parameters for the server-side
 // (third) auth-hash pass. Its input is already a 32-byte high-entropy value, so
 // this pass defends only the at-rest hash, not a low-entropy password — hence
-// the lighter OWASP-minimum cost (m=19 MiB, t=2, p=1). See plan/phase-3-auth.md.
+// the lighter OWASP-minimum cost (m=19 MiB, t=2, p=1). See docs/THREAT_MODEL.md §8.
 func DefaultServerAuthParams() KDFParams {
 	return KDFParams{
 		Type:        "argon2id",

@@ -49,7 +49,7 @@ func run(log *slog.Logger) error {
 	}
 	defer store.Close()
 
-	authMgr := auth.NewManager(store.Sessions, cfg.SessionDuration)
+	authMgr := auth.NewManager(store.Sessions, cfg.AccessTokenDuration, cfg.RefreshTokenDuration)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

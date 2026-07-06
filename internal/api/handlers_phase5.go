@@ -13,7 +13,6 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 
 	"github.com/vinaayakh/secure-vault/internal/api/gen"
-	"github.com/vinaayakh/secure-vault/internal/auth"
 	"github.com/vinaayakh/secure-vault/internal/mfa"
 	"github.com/vinaayakh/secure-vault/internal/storage"
 )
@@ -113,22 +112,14 @@ func (s *Server) PostLoginMfa(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) completeLogin(w http.ResponseWriter, r *http.Request, user *storage.User) {
-	rawToken, err := s.auth.CreateSession(r.Context(), user.ID)
+	accessRaw, refreshRaw, err := s.auth.CreateSessionPair(r.Context(), user.ID)
 	if err != nil {
 		s.logInternalError(r, "login: create session", err)
 		writeJSON(w, http.StatusInternalServerError, gen.Error{Error: "internal server error"})
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     auth.CookieName,
-		Value:    rawToken,
-		Path:     "/",
-		MaxAge:   sessionMaxAge,
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-	})
+	setAuthCookies(w, accessRaw, refreshRaw, s.auth.AccessTTL(), s.auth.RefreshTTL())
 
 	var kdfParams gen.KDFParams
 	if err := json.Unmarshal(user.KDFParams, &kdfParams); err != nil {

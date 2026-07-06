@@ -2,88 +2,111 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/vinaayakh/secure-vault/internal/storage/sqlcgen"
 )
 
 // Session is the in-memory representation of a sessions row.
-// TokenHash is SHA-256 of the raw session token; the raw token is never stored.
 type Session struct {
-	ID        uuid.UUID
-	UserID    uuid.UUID
-	TokenHash []byte
-	ExpiresAt time.Time
-	CreatedAt time.Time
+	ID               uuid.UUID
+	UserID           uuid.UUID
+	AccessTokenHash  []byte
+	AccessExpiresAt  time.Time
+	RefreshTokenHash []byte
+	RefreshExpiresAt time.Time
+	CreatedAt        time.Time
 }
 
-// SessionsRepo provides parameterized access to the sessions table.
+// SessionsRepo provides parameterized access to the sessions table via sqlc.
 type SessionsRepo struct {
-	pool *pgxpool.Pool
+	q *sqlcgen.Queries
 }
 
-const createSessionSQL = `
-INSERT INTO sessions (user_id, token_hash, expires_at)
-VALUES ($1, $2, $3)
-RETURNING id, user_id, token_hash, expires_at, created_at`
-
-// Create inserts a new session row and returns the persisted record.
-func (r *SessionsRepo) Create(ctx context.Context, userID uuid.UUID, tokenHash []byte, expiresAt time.Time) (*Session, error) {
-	s := &Session{}
-	err := r.pool.QueryRow(ctx, createSessionSQL, userID, tokenHash, expiresAt).Scan(
-		&s.ID, &s.UserID, &s.TokenHash, &s.ExpiresAt, &s.CreatedAt,
-	)
+// CreatePair inserts a new session with access and refresh token hashes.
+func (r *SessionsRepo) CreatePair(
+	ctx context.Context,
+	userID uuid.UUID,
+	accessHash []byte,
+	accessExpiresAt time.Time,
+	refreshHash []byte,
+	refreshExpiresAt time.Time,
+) (*Session, error) {
+	s, err := r.q.CreateSessionPair(ctx, sqlcgen.CreateSessionPairParams{
+		UserID:           userID,
+		AccessTokenHash:  accessHash,
+		AccessExpiresAt:  accessExpiresAt,
+		RefreshTokenHash: refreshHash,
+		RefreshExpiresAt: refreshExpiresAt,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("create session: %w", err)
+		return nil, fmt.Errorf("create session pair: %w", err)
 	}
-	return s, nil
+	return sessionFromRow(&s), nil
 }
 
-const getSessionByTokenHashSQL = //nolint:gosec // G101: SQL query constant, not a credential
-`
-SELECT id, user_id, token_hash, expires_at, created_at
-FROM sessions
-WHERE token_hash = $1
-LIMIT 1`
-
-// GetByTokenHash looks up a session by the SHA-256 hash of the raw token.
-// Returns ErrNotFound when no matching row exists.
-func (r *SessionsRepo) GetByTokenHash(ctx context.Context, tokenHash []byte) (*Session, error) {
-	s := &Session{}
-	err := r.pool.QueryRow(ctx, getSessionByTokenHashSQL, tokenHash).Scan(
-		&s.ID, &s.UserID, &s.TokenHash, &s.ExpiresAt, &s.CreatedAt,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
+// GetByAccessHash looks up a session by access token hash.
+func (r *SessionsRepo) GetByAccessHash(ctx context.Context, accessHash []byte) (*Session, error) {
+	s, err := r.q.GetSessionByAccessHash(ctx, accessHash)
 	if err != nil {
-		return nil, fmt.Errorf("get session by token hash: %w", err)
+		return nil, mapNotFound(fmt.Errorf("get session by access hash: %w", err))
 	}
-	return s, nil
+	return sessionFromRow(&s), nil
 }
 
-const deleteSessionSQL = `DELETE FROM sessions WHERE token_hash = $1`
-
-// Delete removes a single session by token hash (logout).
-func (r *SessionsRepo) Delete(ctx context.Context, tokenHash []byte) error {
-	_, err := r.pool.Exec(ctx, deleteSessionSQL, tokenHash)
+// GetByRefreshHash looks up a session by refresh token hash.
+func (r *SessionsRepo) GetByRefreshHash(ctx context.Context, refreshHash []byte) (*Session, error) {
+	s, err := r.q.GetSessionByRefreshHash(ctx, refreshHash)
 	if err != nil {
-		return fmt.Errorf("delete session: %w", err)
+		return nil, mapNotFound(fmt.Errorf("get session by refresh hash: %w", err))
+	}
+	return sessionFromRow(&s), nil
+}
+
+// RotateTokens replaces access and refresh hashes for an existing session row.
+func (r *SessionsRepo) RotateTokens(
+	ctx context.Context,
+	sessionID uuid.UUID,
+	accessHash []byte,
+	accessExpiresAt time.Time,
+	refreshHash []byte,
+	refreshExpiresAt time.Time,
+) (*Session, error) {
+	s, err := r.q.RotateSessionTokens(ctx, sqlcgen.RotateSessionTokensParams{
+		ID:               sessionID,
+		AccessTokenHash:  accessHash,
+		AccessExpiresAt:  accessExpiresAt,
+		RefreshTokenHash: refreshHash,
+		RefreshExpiresAt: refreshExpiresAt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("rotate session tokens: %w", err)
+	}
+	return sessionFromRow(&s), nil
+}
+
+// DeleteByAccessHash removes a session by access token hash.
+func (r *SessionsRepo) DeleteByAccessHash(ctx context.Context, accessHash []byte) error {
+	if err := r.q.DeleteSessionByAccessHash(ctx, accessHash); err != nil {
+		return fmt.Errorf("delete session by access hash: %w", err)
 	}
 	return nil
 }
 
-const deleteAllSessionsForUserSQL = `DELETE FROM sessions WHERE user_id = $1`
+// DeleteByRefreshHash removes a session by refresh token hash.
+func (r *SessionsRepo) DeleteByRefreshHash(ctx context.Context, refreshHash []byte) error {
+	if err := r.q.DeleteSessionByRefreshHash(ctx, refreshHash); err != nil {
+		return fmt.Errorf("delete session by refresh hash: %w", err)
+	}
+	return nil
+}
 
-// DeleteAllForUser removes every session belonging to the given user (account
-// deletion or "sign out everywhere").
+// DeleteAllForUser removes every session belonging to the given user.
 func (r *SessionsRepo) DeleteAllForUser(ctx context.Context, userID uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, deleteAllSessionsForUserSQL, userID)
-	if err != nil {
+	if err := r.q.DeleteAllSessionsForUser(ctx, userID); err != nil {
 		return fmt.Errorf("delete all sessions for user: %w", err)
 	}
 	return nil

@@ -22,8 +22,41 @@ export type RegenerateRecoveryCodesRequest = components["schemas"]["RegenerateRe
 export type ActivityResponse = components["schemas"]["ActivityResponse"];
 export type ActivityEvent = components["schemas"]["ActivityEvent"];
 
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function refreshSession(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      const res = await fetch("/api/auth/refresh", {
+        method: "POST",
+        credentials: "include",
+        headers: { "X-Vault-CSRF": "1" },
+      });
+      return res.ok;
+    })().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+async function fetchWithAuth(
+  path: string,
+  init: RequestInit,
+  retried = false,
+): Promise<Response> {
+  const res = await fetch(path, { credentials: "include", ...init });
+  if (res.status === 401 && !retried && !path.startsWith("/api/auth/refresh")) {
+    const refreshed = await refreshSession();
+    if (refreshed) {
+      return fetchWithAuth(path, init, true);
+    }
+  }
+  return res;
+}
+
 async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(path, { credentials: "include", headers: { Accept: "application/json" } });
+  const res = await fetchWithAuth(path, { headers: { Accept: "application/json" } });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error((body as { error?: string }).error ?? res.statusText);
@@ -32,9 +65,8 @@ async function getJSON<T>(path: string): Promise<T> {
 }
 
 async function postJSON<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetchWithAuth(path, {
     method: "POST",
-    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
@@ -53,9 +85,8 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function putJSON<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetchWithAuth(path, {
     method: "PUT",
-    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
@@ -74,9 +105,8 @@ async function putJSON<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function deleteJSON(path: string, body?: unknown): Promise<void> {
-  const res = await fetch(path, {
+  const res = await fetchWithAuth(path, {
     method: "DELETE",
-    credentials: "include",
     headers: {
       ...(body ? { "Content-Type": "application/json" } : {}),
       "X-Vault-CSRF": "1",
@@ -100,6 +130,8 @@ export const api = {
 
   getLoginKdfParams: (email: string) =>
     getJSON<LoginKdfParamsResponse>(`/api/login/kdf-params?email=${encodeURIComponent(email)}`),
+
+  refreshSession: () => refreshSession(),
 
   logout: () => postJSON<void>("/api/logout", {}),
 

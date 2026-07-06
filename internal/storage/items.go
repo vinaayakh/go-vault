@@ -8,11 +8,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/vinaayakh/secure-vault/internal/storage/sqlcgen"
 )
 
 // VaultItem is the in-memory representation of a vault_items row.
-// Only ciphertext + metadata is stored — no plaintext, ever.
 type VaultItem struct {
 	ID         uuid.UUID
 	UserID     uuid.UUID
@@ -22,118 +22,65 @@ type VaultItem struct {
 	UpdatedAt  time.Time
 }
 
-// ItemsRepo provides injection-safe access to the vault_items table.
-// All queries use pgx parameterized placeholders ($1, $2, …).
+// ItemsRepo provides injection-safe access to vault_items via sqlc.
 type ItemsRepo struct {
-	pool *pgxpool.Pool
+	q *sqlcgen.Queries
 }
 
-const createItemSQL = `
-INSERT INTO vault_items (user_id, ciphertext, item_type)
-VALUES ($1, $2, $3)
-RETURNING id, user_id, ciphertext, item_type, revision, updated_at`
-
-// Create stores a new encrypted item and returns the persisted record.
+// Create stores a new encrypted item.
 func (r *ItemsRepo) Create(ctx context.Context, userID uuid.UUID, ciphertext, itemType string) (*VaultItem, error) {
-	item := &VaultItem{}
-	err := r.pool.QueryRow(ctx, createItemSQL, userID, ciphertext, itemType).Scan(
-		&item.ID, &item.UserID, &item.Ciphertext, &item.ItemType, &item.Revision, &item.UpdatedAt,
-	)
+	item, err := r.q.CreateItem(ctx, userID, ciphertext, itemType)
 	if err != nil {
 		return nil, fmt.Errorf("create item: %w", err)
 	}
-	return item, nil
+	return itemFromRow(item), nil
 }
 
-const getItemSQL = `
-SELECT id, user_id, ciphertext, item_type, revision, updated_at
-FROM vault_items
-WHERE id = $1 AND user_id = $2
-LIMIT 1`
-
-// Get fetches one item by ID, guarded by userID to prevent cross-user access.
-// Returns ErrNotFound when the item does not exist or belongs to another user.
+// Get fetches one item by ID guarded by userID.
 func (r *ItemsRepo) Get(ctx context.Context, id, userID uuid.UUID) (*VaultItem, error) {
-	item := &VaultItem{}
-	err := r.pool.QueryRow(ctx, getItemSQL, id, userID).Scan(
-		&item.ID, &item.UserID, &item.Ciphertext, &item.ItemType, &item.Revision, &item.UpdatedAt,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
+	item, err := r.q.GetItem(ctx, id, userID)
 	if err != nil {
-		return nil, fmt.Errorf("get item: %w", err)
+		return nil, mapNotFound(fmt.Errorf("get item: %w", err))
 	}
-	return item, nil
+	return itemFromRow(item), nil
 }
 
-const listItemsSQL = `
-SELECT id, user_id, ciphertext, item_type, revision, updated_at
-FROM vault_items
-WHERE user_id = $1
-ORDER BY updated_at DESC`
-
-// List returns all items belonging to userID, ordered by most-recently-updated.
+// List returns all items for a user.
 func (r *ItemsRepo) List(ctx context.Context, userID uuid.UUID) ([]*VaultItem, error) {
-	rows, err := r.pool.Query(ctx, listItemsSQL, userID)
+	rows, err := r.q.ListItems(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list items: %w", err)
 	}
-	defer rows.Close()
-
-	var items []*VaultItem
-	for rows.Next() {
-		item := &VaultItem{}
-		if err := rows.Scan(
-			&item.ID, &item.UserID, &item.Ciphertext, &item.ItemType, &item.Revision, &item.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan item row: %w", err)
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list items rows: %w", err)
+	items := make([]*VaultItem, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, itemFromRow(row))
 	}
 	return items, nil
 }
 
-const updateItemSQL = `
-UPDATE vault_items
-SET
-    ciphertext = $4,
-    item_type  = COALESCE($5, item_type),
-    revision   = revision + 1,
-    updated_at = NOW()
-WHERE id = $1
-  AND user_id = $2
-  AND revision = $3
-RETURNING id, user_id, ciphertext, item_type, revision, updated_at`
-
-// Update replaces ciphertext (and optionally item_type) using optimistic concurrency.
-// currentRevision must match the stored revision; returns ErrConflict if not.
-// Returns ErrNotFound when the id/userID pair does not exist.
-// newItemType may be empty string to keep the existing value (COALESCE handles this).
+// Update replaces ciphertext with optimistic concurrency.
 func (r *ItemsRepo) Update(
 	ctx context.Context,
 	id, userID uuid.UUID,
 	currentRevision int,
 	newCiphertext, newItemType string,
 ) (*VaultItem, error) {
-	// Pass nil for newItemType when empty so COALESCE($5, item_type) keeps the existing value.
 	var itemTypeArg any
 	if newItemType != "" {
 		itemTypeArg = newItemType
 	}
-
-	item := &VaultItem{}
-	err := r.pool.QueryRow(ctx, updateItemSQL,
-		id, userID, currentRevision, newCiphertext, itemTypeArg,
-	).Scan(
-		&item.ID, &item.UserID, &item.Ciphertext, &item.ItemType, &item.Revision, &item.UpdatedAt,
-	)
+	rev, err := revisionAsInt32(currentRevision)
+	if err != nil {
+		return nil, err
+	}
+	item, err := r.q.UpdateItem(ctx, sqlcgen.UpdateItemParams{
+		ID:         id,
+		UserID:     userID,
+		Revision:   rev,
+		Ciphertext: newCiphertext,
+		ItemType:   itemTypeArg,
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Could be: item doesn't exist OR revision mismatch.
-		// Check if the item exists (without exposing which case it is to the handler).
 		exists, checkErr := r.itemExists(ctx, id, userID)
 		if checkErr != nil {
 			return nil, fmt.Errorf("update item existence check: %w", checkErr)
@@ -146,15 +93,12 @@ func (r *ItemsRepo) Update(
 	if err != nil {
 		return nil, fmt.Errorf("update item: %w", err)
 	}
-	return item, nil
+	return itemFromRow(item), nil
 }
 
-const itemExistsSQL = `SELECT 1 FROM vault_items WHERE id = $1 AND user_id = $2 LIMIT 1`
-
 func (r *ItemsRepo) itemExists(ctx context.Context, id, userID uuid.UUID) (bool, error) {
-	var one int
-	err := r.pool.QueryRow(ctx, itemExistsSQL, id, userID).Scan(&one)
-	if errors.Is(err, pgx.ErrNoRows) {
+	_, err := r.q.ItemExists(ctx, id, userID)
+	if mapNotFound(err) == ErrNotFound {
 		return false, nil
 	}
 	if err != nil {
@@ -163,18 +107,13 @@ func (r *ItemsRepo) itemExists(ctx context.Context, id, userID uuid.UUID) (bool,
 	return true, nil
 }
 
-const deleteItemSQL = `
-DELETE FROM vault_items
-WHERE id = $1 AND user_id = $2`
-
-// Delete removes an item. Returns ErrNotFound when no row was deleted
-// (item doesn't exist or belongs to another user).
+// Delete removes an item.
 func (r *ItemsRepo) Delete(ctx context.Context, id, userID uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, deleteItemSQL, id, userID)
+	n, err := r.q.DeleteItem(ctx, id, userID)
 	if err != nil {
 		return fmt.Errorf("delete item: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if n == 0 {
 		return ErrNotFound
 	}
 	return nil

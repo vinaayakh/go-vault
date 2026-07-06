@@ -20,7 +20,7 @@ type Config struct {
 	Addr string
 
 	// Read/Write/Idle timeouts harden the server against slow-client DoS
-	// (slowloris). See plan/phase-2-server-storage.md §2.4.
+	// (slowloris). See docs/THREAT_MODEL.md.
 	ReadHeaderTimeout time.Duration
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
@@ -34,9 +34,13 @@ type Config struct {
 	// Defaults to http://localhost:5173 (Vite dev server).
 	AllowedOrigin string
 
-	// SessionDuration is how long a session cookie is valid.
-	// Defaults to 24 hours.
-	SessionDuration time.Duration
+	// AccessTokenDuration is how long the vault_access cookie is valid.
+	// Defaults to 15 minutes.
+	AccessTokenDuration time.Duration
+
+	// RefreshTokenDuration is how long the vault_refresh cookie is valid.
+	// Defaults to 7 days.
+	RefreshTokenDuration time.Duration
 }
 
 // Load reads configuration from the environment, applies safe defaults, and
@@ -53,13 +57,31 @@ func Load() (*Config, error) {
 		return nil, errors.New("DATABASE_URL is required but not set")
 	}
 
-	sessionDuration := 24 * time.Hour
+	accessDuration := 15 * time.Minute
+	if raw := os.Getenv("ACCESS_TOKEN_DURATION"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("ACCESS_TOKEN_DURATION must be a valid duration (e.g. 15m), got %q", raw)
+		}
+		accessDuration = d
+	}
+
+	refreshDuration := 168 * time.Hour
+	if raw := os.Getenv("REFRESH_TOKEN_DURATION"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("REFRESH_TOKEN_DURATION must be a valid duration (e.g. 168h), got %q", raw)
+		}
+		refreshDuration = d
+	}
+
+	// Deprecated: SESSION_DURATION maps to refresh token lifetime for backward compat.
 	if raw := os.Getenv("SESSION_DURATION"); raw != "" {
 		d, err := time.ParseDuration(raw)
 		if err != nil {
 			return nil, fmt.Errorf("SESSION_DURATION must be a valid duration (e.g. 24h), got %q", raw)
 		}
-		sessionDuration = d
+		refreshDuration = d
 	}
 
 	allowedOrigin := getenv("ALLOWED_ORIGIN", "http://localhost:5173")
@@ -76,14 +98,15 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Addr:              ":" + port,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		DatabaseDSN:       dsn,
-		AllowedOrigin:     allowedOrigin,
-		SessionDuration:   sessionDuration,
+		Addr:                 ":" + port,
+		ReadHeaderTimeout:    5 * time.Second,
+		ReadTimeout:          15 * time.Second,
+		WriteTimeout:         15 * time.Second,
+		IdleTimeout:          60 * time.Second,
+		DatabaseDSN:          dsn,
+		AllowedOrigin:        allowedOrigin,
+		AccessTokenDuration:  accessDuration,
+		RefreshTokenDuration: refreshDuration,
 	}
 	return cfg, nil
 }

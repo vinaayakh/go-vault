@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { getCrypto, toCryptoKdfParams, DEFAULT_KDF_PARAMS } from "../crypto/service";
+import { checkBreached } from "../lib/password-health";
 import { useVault } from "../context/VaultContext";
 import type { Item } from "../api/client";
 
@@ -19,6 +20,18 @@ export function ChangePasswordModal({ email, items, onClose, onRotated }: Props)
   const [rotateVaultKey, setRotateVaultKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [breachCount, setBreachCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!newPassword) {
+      setBreachCount(null);
+      return;
+    }
+    const t = setTimeout(() => {
+      void checkBreached(newPassword).then(setBreachCount).catch(() => setBreachCount(null));
+    }, 400);
+    return () => clearTimeout(t);
+  }, [newPassword]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -103,6 +116,11 @@ export function ChangePasswordModal({ email, items, onClose, onRotated }: Props)
           New password
           <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required disabled={busy}
             style={{ display: "block", width: "100%", padding: "0.5rem", marginTop: "0.25rem" }} />
+          {breachCount !== null && breachCount > 0 && (
+            <p style={{ color: "crimson", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>
+              This password appears in {breachCount.toLocaleString()} known breaches.
+            </p>
+          )}
         </label>
         <label style={{ display: "block", marginBottom: "0.75rem" }}>
           Confirm new password

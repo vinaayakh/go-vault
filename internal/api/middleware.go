@@ -130,20 +130,17 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-// sessionAuth validates the vault_session cookie on every protected request.
-// On success it injects the user UUID into the context so handlers can retrieve
-// it with userIDFromCtx. Returns 401 on any failure (no distinction between
-// missing, expired, or invalid — avoids information leaks).
+// sessionAuth validates the vault_access cookie on every protected request.
 func sessionAuth(mgr *auth.Manager) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			cookie, err := r.Cookie(auth.CookieName)
+			cookie, err := r.Cookie(auth.AccessCookieName)
 			if err != nil {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 				return
 			}
 
-			sess, err := mgr.ValidateSession(r.Context(), cookie.Value)
+			sess, err := mgr.ValidateAccess(r.Context(), cookie.Value)
 			if errors.Is(err, auth.ErrSessionInvalid) {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 				return

@@ -25,7 +25,7 @@ test: ## Run Go tests with the race detector
 	go test -race $(PKG)
 
 test-integration: ## Run integration tests (requires TEST_DATABASE_URL env var)
-	go test -race -tags integration ./internal/storage/...
+	go test -race -tags integration ./internal/storage/... ./internal/api/...
 
 generate: ## Regenerate code from go:generate directives (oapi-codegen)
 	go generate $(PKG)

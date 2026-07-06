@@ -12,7 +12,8 @@ info:
     **Phase 3:** real session authentication replaces the Phase 2 `X-Dev-User` dev
     guard. Register derives the master key and auth hash client-side; the server
     stores only a server-side Argon2id hash of the auth hash (zero-knowledge
-    invariant). Login issues a `vault_session` HttpOnly/Secure/SameSite=Strict cookie.
+    invariant). Login issues `vault_access` (short-lived) and `vault_refresh`
+    (rotating) HttpOnly/Secure/SameSite=Strict cookies.
   version: 0.4.0
 servers:
   - url: /
@@ -79,8 +80,8 @@ paths:
       description: |
         Accepts email + the client-derived auth hash. The server re-hashes the
         auth hash server-side and compares with the stored value using
-        constant-time equality. On success, sets a `vault_session` session cookie
-        (HttpOnly, Secure, SameSite=Strict) and returns the protected symmetric
+        constant-time equality. On success, sets `vault_access` and `vault_refresh`
+        cookies (HttpOnly, Secure, SameSite=Strict) and returns the protected symmetric
         key + KDF params so the client can unlock the vault locally.
       tags: [auth]
       requestBody:
@@ -110,7 +111,7 @@ paths:
       description: |
         Second step after POST /api/login when `mfa_required` is true. Validates
         the TOTP code (server-side via the client-supplied secret over TLS) or a
-        single-use recovery code. On success, sets the session cookie and returns
+        single-use recovery code. On success, sets the access and refresh cookies and returns
         the vault unlock material.
       tags: [auth]
       requestBody:
@@ -133,13 +134,29 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
+  /api/auth/refresh:
+    post:
+      operationId: postAuthRefresh
+      summary: Rotate access token using refresh cookie
+      description: |
+        Reads the `vault_refresh` cookie (path `/api/auth/refresh`), validates it,
+        rotates both tokens server-side, and returns new `vault_access` and
+        `vault_refresh` cookies. Requires the `X-Vault-CSRF: 1` header.
+      tags: [auth]
+      responses:
+        "204":
+          description: Tokens rotated. New cookies set.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /api/logout:
     post:
       operationId: postLogout
       summary: Revoke the current session
       description: |
-        Revokes the session server-side and clears the `vault_session` cookie.
-        Requires a valid session cookie and the `X-Vault-CSRF: 1` header.
+        Revokes the session server-side and clears the `vault_access` and
+        `vault_refresh` cookies. Requires a valid access cookie and the
+        `X-Vault-CSRF: 1` header.
       tags: [auth]
       responses:
         "204":
@@ -332,7 +349,7 @@ paths:
       summary: List the caller's vault items (ciphertext only)
       description: |
         Returns every vault item belonging to the authenticated user as opaque
-        ciphertext + metadata. Requires a valid `vault_session` cookie (Phase 3).
+        ciphertext + metadata. Requires a valid `vault_access` cookie (Phase 3).
       tags: [items]
       responses:
         "200":
@@ -510,9 +527,7 @@ components:
           example: true
 
     # An encrypted vault item as stored/returned by the server. Mirrors the
-    # `vault_items` columns from plan/phase-2-server-storage.md: ciphertext +
-    # metadata ONLY — never plaintext. This encodes the zero-knowledge
-    # invariant directly into the API contract.
+    # `vault_items` columns: ciphertext + metadata only (see docs/THREAT_MODEL.md §8).
     Item:
       type: object
       required: [id, item_type, ciphertext, revision, updated_at]
@@ -530,7 +545,7 @@ components:
           description: |
             Base64-encoded (standard, padded) AEAD ciphertext of the item.
             Opaque to the server. Format: nonce(24 bytes) || ciphertext || tag(16 bytes),
-            base64-encoded as a single blob. See plan/phase-1-crypto-core.md §wire-formats.
+            base64-encoded as a single blob. See docs/THREAT_MODEL.md §8.
         revision:
           type: integer
           description: |
@@ -574,7 +589,7 @@ components:
 
     # KDFParams is the Argon2id derivation settings stored alongside each user.
     # The client receives these at sync time so it can re-derive the master key.
-    # Wire format matches plan/phase-1-crypto-core.md §wire-formats exactly:
+    # Wire format matches docs/THREAT_MODEL.md §8.
     # { "type": "argon2id", "version": 19, "memory_kib": 65536, "iterations": 3, "parallelism": 1 }
     KDFParams:
       type: object

@@ -161,8 +161,9 @@ curl http://localhost:8080/api/health   # {"status":"ok"}
 | Audit log / recent activity | Settings → Activity |
 | Master password change | Settings → Security |
 | Encrypted vault export/import | Settings → Data; [EXPORT_FORMAT.md](docs/EXPORT_FORMAT.md) |
-| HIBP breach check | Registration + password fields (client-side) |
+| HIBP breach check | Registration + change-password fields (client-side) |
 | Account recovery policy | [docs/RECOVERY.md](docs/RECOVERY.md) |
+| Database backup/restore | [docs/BACKUP.md](docs/BACKUP.md) |
 
 ## Verify release image (cosign)
 

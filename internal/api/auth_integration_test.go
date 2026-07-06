@@ -24,11 +24,13 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/pquerna/otp/totp"
 	"github.com/vinaayakh/secure-vault/internal/api"
 	"github.com/vinaayakh/secure-vault/internal/api/gen"
 	"github.com/vinaayakh/secure-vault/internal/auth"
 	"github.com/vinaayakh/secure-vault/internal/config"
 	"github.com/vinaayakh/secure-vault/internal/crypto"
+	"github.com/vinaayakh/secure-vault/internal/mfa"
 	"github.com/vinaayakh/secure-vault/internal/storage"
 )
 
@@ -48,10 +50,11 @@ func testServer(t *testing.T) (*httptest.Server, *storage.Store) {
 	t.Cleanup(store.Close)
 
 	cfg := &config.Config{
-		AllowedOrigin:   "http://localhost:5173",
-		SessionDuration: 24 * time.Hour,
+		AllowedOrigin:        "http://localhost:5173",
+		AccessTokenDuration:  15 * time.Minute,
+		RefreshTokenDuration: 24 * time.Hour,
 	}
-	authMgr := auth.NewManager(store.Sessions, cfg.SessionDuration)
+	authMgr := auth.NewManager(store.Sessions, cfg.AccessTokenDuration, cfg.RefreshTokenDuration)
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	handler := api.NewRouter(log, store, authMgr, cfg)
@@ -146,9 +149,18 @@ func doJSON(t *testing.T, client *http.Client, baseURL, method, path string, bod
 	return resp
 }
 
-func sessionCookie(resp *http.Response) *http.Cookie {
+func accessCookie(resp *http.Response) *http.Cookie {
 	for _, c := range resp.Cookies() {
-		if c.Name == auth.CookieName {
+		if c.Name == auth.AccessCookieName {
+			return c
+		}
+	}
+	return nil
+}
+
+func refreshCookie(resp *http.Response) *http.Cookie {
+	for _, c := range resp.Cookies() {
+		if c.Name == auth.RefreshCookieName {
 			return c
 		}
 	}
@@ -182,9 +194,12 @@ func TestRegisterLogin(t *testing.T) {
 		t.Fatalf("login: got %d, want 200", loginResp.StatusCode)
 	}
 
-	cookie := sessionCookie(loginResp)
+	cookie := accessCookie(loginResp)
 	if cookie == nil {
-		t.Fatal("login: no vault_session cookie in response")
+		t.Fatal("login: no vault_access cookie in response")
+	}
+	if refreshCookie(loginResp) == nil {
+		t.Fatal("login: no vault_refresh cookie in response")
 	}
 	if !cookie.HttpOnly {
 		t.Error("session cookie must be HttpOnly")
@@ -226,7 +241,7 @@ func TestLogout(t *testing.T) {
 
 	loginResp := doJSON(t, client, srv.URL, http.MethodPost, "/api/login",
 		map[string]any{"email": creds.Email, "auth_hash": creds.AuthHash}, nil)
-	cookie := sessionCookie(loginResp)
+	cookie := accessCookie(loginResp)
 	loginResp.Body.Close()
 
 	// Logout.
@@ -367,7 +382,7 @@ func TestPutUserKey(t *testing.T) {
 
 	loginResp := doJSON(t, client, srv.URL, http.MethodPost, "/api/login",
 		map[string]any{"email": creds.Email, "auth_hash": creds.AuthHash}, nil)
-	cookie := sessionCookie(loginResp)
+	cookie := accessCookie(loginResp)
 	loginResp.Body.Close()
 
 	newCreds := deriveClientCreds(t, email, newPass)
@@ -397,4 +412,175 @@ func TestPutUserKey(t *testing.T) {
 	if good.StatusCode != http.StatusOK {
 		t.Fatalf("new password after rotation: got %d, want 200", good.StatusCode)
 	}
+}
+
+// TestAuthRefresh verifies refresh token rotation issues new cookies.
+func TestAuthRefresh(t *testing.T) {
+	srv, _ := testServer(t)
+	client := &http.Client{}
+	creds := deriveClientCreds(t, uniqueEmail(), "correct-horse-battery-staple")
+
+	doJSON(t, client, srv.URL, http.MethodPost, "/api/register",
+		map[string]any{
+			"email": creds.Email, "kdf_params": creds.KDFParams,
+			"auth_hash": creds.AuthHash, "protected_symmetric_key": creds.ProtectedSymmetricKey,
+		}, nil).Body.Close()
+
+	loginResp := doJSON(t, client, srv.URL, http.MethodPost, "/api/login",
+		map[string]any{"email": creds.Email, "auth_hash": creds.AuthHash}, nil)
+	access := accessCookie(loginResp)
+	refresh := refreshCookie(loginResp)
+	loginResp.Body.Close()
+	if access == nil || refresh == nil {
+		t.Fatal("login: missing auth cookies")
+	}
+
+	refreshResp := doJSON(t, client, srv.URL, http.MethodPost, "/api/auth/refresh", nil, refresh)
+	refreshResp.Body.Close()
+	if refreshResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("refresh: got %d, want 204", refreshResp.StatusCode)
+	}
+
+	newAccess := accessCookie(refreshResp)
+	newRefresh := refreshCookie(refreshResp)
+	if newAccess == nil || newRefresh == nil {
+		t.Fatal("refresh: missing rotated cookies")
+	}
+	if newAccess.Value == access.Value {
+		t.Error("refresh: access token should rotate")
+	}
+	if newRefresh.Value == refresh.Value {
+		t.Error("refresh: refresh token should rotate")
+	}
+
+	// Old refresh token must fail.
+	oldRefreshResp := doJSON(t, client, srv.URL, http.MethodPost, "/api/auth/refresh", nil, refresh)
+	oldRefreshResp.Body.Close()
+	if oldRefreshResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("stale refresh: got %d, want 401", oldRefreshResp.StatusCode)
+	}
+
+	// New access token must work.
+	syncResp := doJSON(t, client, srv.URL, http.MethodGet, "/api/sync", nil, newAccess)
+	syncResp.Body.Close()
+	if syncResp.StatusCode != http.StatusOK {
+		t.Fatalf("sync with new access: got %d, want 200", syncResp.StatusCode)
+	}
+}
+
+// TestLoginLockout locks an account after repeated failures.
+func TestLoginLockout(t *testing.T) {
+	srv, _ := testServer(t)
+	client := &http.Client{}
+	creds := deriveClientCreds(t, uniqueEmail(), "correct-horse-battery-staple")
+	wrong := deriveClientCreds(t, creds.Email, "wrong-password")
+
+	doJSON(t, client, srv.URL, http.MethodPost, "/api/register",
+		map[string]any{
+			"email": creds.Email, "kdf_params": creds.KDFParams,
+			"auth_hash": creds.AuthHash, "protected_symmetric_key": creds.ProtectedSymmetricKey,
+		}, nil).Body.Close()
+
+	for i := 0; i < 6; i++ {
+		resp := doJSON(t, client, srv.URL, http.MethodPost, "/api/login",
+			map[string]any{"email": creds.Email, "auth_hash": wrong.AuthHash}, nil)
+		resp.Body.Close()
+	}
+
+	locked := doJSON(t, client, srv.URL, http.MethodPost, "/api/login",
+		map[string]any{"email": creds.Email, "auth_hash": creds.AuthHash}, nil)
+	locked.Body.Close()
+	if locked.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("locked login: got %d, want 429", locked.StatusCode)
+	}
+}
+
+// TestLoginMFA covers enroll → login with MFA challenge → TOTP verification.
+func TestLoginMFA(t *testing.T) {
+	srv, _ := testServer(t)
+	client := &http.Client{}
+	email := uniqueEmail()
+	password := "correct-horse-battery-staple"
+	creds := deriveClientCreds(t, email, password)
+
+	doJSON(t, client, srv.URL, http.MethodPost, "/api/register",
+		map[string]any{
+			"email": creds.Email, "kdf_params": creds.KDFParams,
+			"auth_hash": creds.AuthHash, "protected_symmetric_key": creds.ProtectedSymmetricKey,
+		}, nil).Body.Close()
+
+	loginResp := doJSON(t, client, srv.URL, http.MethodPost, "/api/login",
+		map[string]any{"email": email, "auth_hash": creds.AuthHash}, nil)
+	cookie := accessCookie(loginResp)
+	loginResp.Body.Close()
+
+	// Derive vault key for wrapping TOTP secret.
+	params := crypto.DefaultKDFParams()
+	masterKey, _ := crypto.DeriveMasterKey([]byte(password), []byte(crypto.NormalizeEmail(email)), params)
+	encKey, _, _ := crypto.StretchMasterKey(masterKey)
+	vaultKey, _ := crypto.UnwrapKey(encKey, mustDecodeB64(t, creds.ProtectedSymmetricKey), nil)
+
+	secret, _, err := mfa.GenerateTOTPSecret("SecureVault", email)
+	if err != nil {
+		t.Fatalf("generate totp secret: %v", err)
+	}
+	code, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatalf("generate totp code: %v", err)
+	}
+	wrapped, err := crypto.WrapTOTPSecret(vaultKey, secret)
+	if err != nil {
+		t.Fatalf("wrap totp secret: %v", err)
+	}
+
+	enrollResp := doJSON(t, client, srv.URL, http.MethodPost, "/api/user/2fa/enroll",
+		map[string]any{
+			"protected_totp_secret": base64.StdEncoding.EncodeToString(wrapped),
+			"totp_secret":           secret,
+			"totp_code":             code,
+		}, cookie)
+	enrollResp.Body.Close()
+	if enrollResp.StatusCode != http.StatusOK {
+		t.Fatalf("enroll 2fa: got %d, want 200", enrollResp.StatusCode)
+	}
+
+	doJSON(t, client, srv.URL, http.MethodPost, "/api/logout", nil, cookie).Body.Close()
+
+	mfaLogin := doJSON(t, client, srv.URL, http.MethodPost, "/api/login",
+		map[string]any{"email": email, "auth_hash": creds.AuthHash}, nil)
+	var mfaBody gen.LoginResponse
+	if err := json.NewDecoder(mfaLogin.Body).Decode(&mfaBody); err != nil {
+		t.Fatalf("decode mfa login: %v", err)
+	}
+	mfaLogin.Body.Close()
+	if mfaBody.MfaRequired == nil || !*mfaBody.MfaRequired {
+		t.Fatal("expected mfa_required after enroll")
+	}
+
+	code2, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatalf("generate totp code: %v", err)
+	}
+	mfaResp := doJSON(t, client, srv.URL, http.MethodPost, "/api/login/mfa",
+		map[string]any{
+			"mfa_token":   *mfaBody.MfaToken,
+			"totp_code":   code2,
+			"totp_secret": secret,
+		}, nil)
+	mfaResp.Body.Close()
+	if mfaResp.StatusCode != http.StatusOK {
+		t.Fatalf("login mfa: got %d, want 200", mfaResp.StatusCode)
+	}
+	if accessCookie(mfaResp) == nil {
+		t.Fatal("login mfa: missing access cookie")
+	}
+}
+
+func mustDecodeB64(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		t.Fatalf("decode b64: %v", err)
+	}
+	return b
 }

@@ -15,8 +15,10 @@ import (
 )
 
 const (
-	rawTokenBytes = 32
-	cookieName    = "vault_session"
+	rawTokenBytes     = 32
+	AccessCookieName  = "vault_access"
+	RefreshCookieName = "vault_refresh"
+	RefreshCookiePath = "/api/auth/refresh"
 
 	// loginIPLimit: max failed attempts per IP per window.
 	loginIPLimit  = 10
@@ -31,42 +33,60 @@ const (
 	registerIPWindow = time.Hour
 )
 
-// CookieName is the session cookie name used by the API layer.
-const CookieName = cookieName
+// CookieName is deprecated; use AccessCookieName.
+const CookieName = AccessCookieName
 
-// Manager handles session lifecycle and rate limiting.
+// Manager handles session lifecycle, rate limiting, and account lockout.
 type Manager struct {
 	sessions   *storage.SessionsRepo
 	loginIP    *RateLimiter
 	loginAcct  *RateLimiter
 	registerIP *RateLimiter
-	duration   time.Duration
+	lockout    *LockoutTracker
+	accessTTL  time.Duration
+	refreshTTL time.Duration
 }
 
 // NewManager creates a Manager backed by the given sessions repository.
-func NewManager(sessions *storage.SessionsRepo, duration time.Duration) *Manager {
+func NewManager(sessions *storage.SessionsRepo, accessTTL, refreshTTL time.Duration) *Manager {
 	return &Manager{
 		sessions:   sessions,
 		loginIP:    newRateLimiter(loginIPLimit, loginIPWindow),
 		loginAcct:  newRateLimiter(loginAccountLimit, loginAccountWindow),
 		registerIP: newRateLimiter(registerIPLimit, registerIPWindow),
-		duration:   duration,
+		lockout:    newLockoutTracker(),
+		accessTTL:  accessTTL,
+		refreshTTL: refreshTTL,
 	}
 }
 
+// AccessTTL returns the configured access-token lifetime.
+func (m *Manager) AccessTTL() time.Duration { return m.accessTTL }
+
+// RefreshTTL returns the configured refresh-token lifetime.
+func (m *Manager) RefreshTTL() time.Duration { return m.refreshTTL }
+
+// IsLoginLocked reports whether the email is temporarily locked out.
+func (m *Manager) IsLoginLocked(email string) bool {
+	return m.lockout.IsLocked(email)
+}
+
+// RecordLoginFailure records a failed login and returns the backoff delay.
+func (m *Manager) RecordLoginFailure(email string) time.Duration {
+	return m.lockout.RecordFailure(email)
+}
+
 // CheckLoginLimit returns true if the request is within allowed limits for the
-// given IP and email. Both the per-IP and per-account windows must have capacity.
-// The attempt is recorded only when both checks pass (fail-open on the recording
-// side is fine — we never want to lock out the legitimate user via our own counter).
+// given IP and email.
 func (m *Manager) CheckLoginLimit(ip, email string) bool {
 	return m.loginIP.Allow(ip) && m.loginAcct.Allow(email)
 }
 
-// ResetLoginLimit clears the counters for a key pair after a successful login
-// so the user is not penalized for earlier mistakes.
+// ResetLoginLimit clears rate-limit and lockout counters after successful login.
 func (m *Manager) ResetLoginLimit(ip, email string) {
 	m.loginIP.Reset(ip)
 	m.loginAcct.Reset(email)
+	m.lockout.Reset(email)
 }
 
 // CheckRegisterLimit returns true if this IP is within the registration limit.
@@ -74,57 +94,87 @@ func (m *Manager) CheckRegisterLimit(ip string) bool {
 	return m.registerIP.Allow(ip)
 }
 
-// CreateSession mints a new session for userID, persists the token hash, and
-// returns the raw hex token (to be placed in the session cookie).
-func (m *Manager) CreateSession(ctx context.Context, userID uuid.UUID) (string, error) {
-	raw, err := generateToken()
+// CreateSessionPair mints access + refresh tokens, persists their hashes, and
+// returns the raw hex tokens for cookie placement.
+func (m *Manager) CreateSessionPair(ctx context.Context, userID uuid.UUID) (accessRaw, refreshRaw string, err error) {
+	accessRaw, err = generateToken()
 	if err != nil {
-		return "", fmt.Errorf("generate session token: %w", err)
+		return "", "", fmt.Errorf("generate access token: %w", err)
+	}
+	refreshRaw, err = generateToken()
+	if err != nil {
+		return "", "", fmt.Errorf("generate refresh token: %w", err)
 	}
 
-	hash := hashToken(raw)
-	expiresAt := time.Now().Add(m.duration)
-
-	if _, err := m.sessions.Create(ctx, userID, hash, expiresAt); err != nil {
-		return "", fmt.Errorf("persist session: %w", err)
+	now := time.Now()
+	_, err = m.sessions.CreatePair(ctx, userID,
+		hashToken(accessRaw), now.Add(m.accessTTL),
+		hashToken(refreshRaw), now.Add(m.refreshTTL),
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("persist session: %w", err)
 	}
-
-	return raw, nil
+	return accessRaw, refreshRaw, nil
 }
 
-// ValidateSession looks up the session by token hash, checks expiry, and returns
-// the session record. Returns ErrSessionInvalid for any failure so callers
-// cannot distinguish not-found from expired (no information leak).
-func (m *Manager) ValidateSession(ctx context.Context, rawToken string) (*storage.Session, error) {
-	hash := hashToken(rawToken)
-
-	sess, err := m.sessions.GetByTokenHash(ctx, hash)
+// ValidateAccess looks up the session by access token hash and checks expiry.
+func (m *Manager) ValidateAccess(ctx context.Context, accessRaw string) (*storage.Session, error) {
+	sess, err := m.sessions.GetByAccessHash(ctx, hashToken(accessRaw))
 	if errors.Is(err, storage.ErrNotFound) {
 		return nil, ErrSessionInvalid
 	}
 	if err != nil {
 		return nil, fmt.Errorf("look up session: %w", err)
 	}
-
-	if time.Now().After(sess.ExpiresAt) {
-		_ = m.sessions.Delete(ctx, hash) // best-effort cleanup
+	if time.Now().After(sess.AccessExpiresAt) {
 		return nil, ErrSessionInvalid
 	}
-
 	return sess, nil
 }
 
-// RevokeSession deletes a single session (logout).
-func (m *Manager) RevokeSession(ctx context.Context, rawToken string) error {
-	hash := hashToken(rawToken)
-	if err := m.sessions.Delete(ctx, hash); err != nil {
+// RefreshSession validates the refresh token, rotates both hashes, and returns
+// new raw tokens. The previous refresh token is invalidated atomically.
+func (m *Manager) RefreshSession(ctx context.Context, refreshRaw string) (newAccess, newRefresh string, err error) {
+	sess, err := m.sessions.GetByRefreshHash(ctx, hashToken(refreshRaw))
+	if errors.Is(err, storage.ErrNotFound) {
+		return "", "", ErrSessionInvalid
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("look up refresh session: %w", err)
+	}
+	if time.Now().After(sess.RefreshExpiresAt) {
+		return "", "", ErrSessionInvalid
+	}
+
+	newAccess, err = generateToken()
+	if err != nil {
+		return "", "", fmt.Errorf("generate access token: %w", err)
+	}
+	newRefresh, err = generateToken()
+	if err != nil {
+		return "", "", fmt.Errorf("generate refresh token: %w", err)
+	}
+
+	now := time.Now()
+	_, err = m.sessions.RotateTokens(ctx, sess.ID,
+		hashToken(newAccess), now.Add(m.accessTTL),
+		hashToken(newRefresh), now.Add(m.refreshTTL),
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("rotate session tokens: %w", err)
+	}
+	return newAccess, newRefresh, nil
+}
+
+// RevokeSession deletes the session identified by the access token.
+func (m *Manager) RevokeSession(ctx context.Context, accessRaw string) error {
+	if err := m.sessions.DeleteByAccessHash(ctx, hashToken(accessRaw)); err != nil {
 		return fmt.Errorf("revoke session: %w", err)
 	}
 	return nil
 }
 
-// RevokeAllSessions deletes every session for a user (account deletion or
-// "sign out everywhere").
+// RevokeAllSessions deletes every session for a user.
 func (m *Manager) RevokeAllSessions(ctx context.Context, userID uuid.UUID) error {
 	if err := m.sessions.DeleteAllForUser(ctx, userID); err != nil {
 		return fmt.Errorf("revoke all sessions: %w", err)
@@ -136,7 +186,6 @@ func (m *Manager) RevokeAllSessions(ctx context.Context, userID uuid.UUID) error
 // not found. Callers must not distinguish between these cases.
 var ErrSessionInvalid = errors.New("session invalid or expired")
 
-// generateToken returns a 32-byte cryptographically random hex string.
 func generateToken() (string, error) {
 	b := make([]byte, rawTokenBytes)
 	if _, err := rand.Read(b); err != nil {
@@ -145,7 +194,6 @@ func generateToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// hashToken returns the SHA-256 hash of a raw hex token for safe DB storage.
 func hashToken(rawToken string) []byte {
 	h := sha256.Sum256([]byte(rawToken))
 	return h[:]

@@ -3,7 +3,7 @@
 // pure Go so the exact same implementation compiles to WASM for the browser
 // (Phase 4) and is audited/fuzzed once, reused everywhere.
 //
-// Implemented in Phase 1 — see plan/phase-1-crypto-core.md.
+// Implemented in Phase 1 — see docs/THREAT_MODEL.md §8.
 package crypto
 
 import (

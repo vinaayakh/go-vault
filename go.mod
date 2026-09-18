@@ -5,9 +5,10 @@ go 1.26.0
 require (
 	github.com/getkin/kin-openapi v0.135.0
 	github.com/google/uuid v1.6.0
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/oapi-codegen/oapi-codegen/v2 v2.7.1
 	github.com/oapi-codegen/runtime v1.4.1
+	github.com/pquerna/otp v1.4.0
 	github.com/sqlc-dev/sqlc v1.31.1
 	golang.org/x/crypto v0.52.0
 )
@@ -45,7 +46,6 @@ require (
 	github.com/pingcap/failpoint v0.0.0-20240528011301-b51a646c7c86 // indirect
 	github.com/pingcap/log v1.1.0 // indirect
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20260418072757-ce92298d1124 // indirect
-	github.com/pquerna/otp v1.4.0 // indirect
 	github.com/riza-io/grpc-go v0.2.0 // indirect
 	github.com/speakeasy-api/jsonpath v0.6.3 // indirect
 	github.com/speakeasy-api/openapi v1.19.2 // indirect
